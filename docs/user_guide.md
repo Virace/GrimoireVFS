@@ -219,7 +219,7 @@ with ArchiveReader(
 
 ## Hook 系统
 
-### 内置 Hook
+### 内置 Hook (纯 Python)
 
 | Hook | 用途 | algo_id | 输出大小 |
 |------|------|---------|---------|
@@ -228,7 +228,51 @@ with ArchiveReader(
 | `MD5Hook` | MD5 校验 | 2 | 16 |
 | `SHA1Hook` | SHA1 校验 | 3 | 20 |
 | `SHA256Hook` | SHA256 校验 | 4 | 32 |
-| `QuickXorHashHook` | OneDrive 快速哈希 | 5 | 20 |
+
+### RcloneHashHook (推荐)
+
+通过调用 [rclone](https://rclone.org/) 计算哈希，性能远超纯 Python 实现。
+
+支持 13 种算法: `md5`, `sha1`, `sha256`, `sha512`, `crc32`, `blake3`, `xxh3`, `xxh128`, `quickxor`, `dropbox`, `whirlpool`, `hidrive`, `mailru`
+
+```python
+from grimoire import RcloneHashHook
+
+# 创建 hook (algo_id 自动分配 101-113)
+hook = RcloneHashHook("quickxor")  # OneDrive 专用，速度最快
+hook = RcloneHashHook("blake3")     # 现代快速哈希
+hook = RcloneHashHook("xxh3")       # 极速非加密哈希
+
+# 单文件计算 (推荐)
+hash_bytes = hook.compute_file("/path/to/file")
+
+# 批量目录计算
+hash_map = hook.compute_dir("/path/to/dir", recursive=True)
+
+# 内存数据计算 (会写临时文件，较慢)
+hash_bytes = hook.compute(data)
+```
+
+### 高性能批量操作
+
+使用 `add_dir_batch_rclone` 可一次性计算整个目录:
+
+```python
+from grimoire import ManifestBuilder, RcloneHashHook
+
+builder = ManifestBuilder("game.manifest", checksum_hook=RcloneHashHook("quickxor"))
+
+# ⚡ 1000+ 文件仅需 10 秒 (vs 普通方法 6 分钟)
+result = builder.add_dir_batch_rclone("./assets", "/game")
+```
+
+### 索引压缩 Hook
+
+| Hook | 用途 |
+|------|------|
+| `ZlibCompressHook` | zlib 压缩索引区 |
+| `XorObfuscateHook` | 简单 XOR 混淆 |
+| `ZlibXorHook` | 先压缩后混淆 |
 
 ### 自定义压缩 Hook
 

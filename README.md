@@ -6,10 +6,11 @@
 
 - **零依赖**: 仅使用 Python 标准库
 - **双模式**: Manifest (清单校验) / Archive (资源打包)
-- **高性能**: mmap 读取、批量操作、进度回调
+- **高性能**: mmap 读取、批量操作、rclone 加速
 - **安全**: 索引加密、路径 Hash、校验算法可配置
 
 ## 📦 安装
+
 **当前不可用**
 ```bash
 pip install grimoire-vfs
@@ -17,18 +18,29 @@ pip install grimoire-vfs
 
 ## 🚀 快速开始
 
-### Manifest 模式 (清单校验)
+### Manifest 模式 (清单校验) - 推荐使用 rclone
 
 ```python
-from grimoire import ManifestBuilder, ManifestReader, MD5Hook
+from grimoire import ManifestBuilder, ManifestReader, RcloneHashHook
+from grimoire.hooks import ZlibCompressHook
 
-# 创建清单
-builder = ManifestBuilder("game.manifest", checksum_hook=MD5Hook())
-builder.add_dir("./assets", "/game/assets")
+# 创建清单 (使用 rclone quickxor，性能最优)
+builder = ManifestBuilder(
+    "game.manifest",
+    checksum_hook=RcloneHashHook("quickxor"),  # 或 sha256, md5, blake3...
+    index_crypto=ZlibCompressHook()  # 压缩索引区
+)
+
+# 批量添加 (使用 rclone 批量计算，1000+ 文件仅需 10 秒)
+result = builder.add_dir_batch_rclone("./assets", "/game/assets")
+print(f"成功: {result.success_count}, 耗时: {result.elapsed_time:.1f}s")
 builder.build()
 
 # 校验文件
-with ManifestReader("game.manifest", checksum_hook=MD5Hook()) as reader:
+with ManifestReader("game.manifest", 
+    checksum_hook=RcloneHashHook("quickxor"),
+    index_crypto=ZlibCompressHook()
+) as reader:
     is_valid = reader.verify_file("/game/assets/hero.png", "./assets/hero.png")
 ```
 
@@ -55,25 +67,24 @@ with ArchiveReader("game.pak", compression_hooks=[ZlibHook()]) as reader:
     data = reader.read("/game/hero.png")
 ```
 
-### 批量操作 (带进度)
+### 格式转换
 
 ```python
-def on_progress(info):
-    print(f"{info.progress:.1%} - {info.current_file}")
+from grimoire import ManifestJsonConverter, ModeConverter
 
-# 批量打包
-result = builder.add_dir_batch(
-    "./assets", "/game",
-    progress_callback=on_progress,
-    on_error='skip'
-)
-print(f"成功: {result.success_count}, 失败: {result.failed_count}")
+# Manifest 转 JSON (支持 rclone hook)
+ManifestJsonConverter.manifest_to_json("game.manifest", "game.json")
 
-# 批量解包
-result = reader.extract_all("./output", progress_callback=on_progress)
+# JSON 转 Manifest
+ManifestJsonConverter.json_to_manifest("game.json", "new.manifest", "./local")
+
+# Archive 转 Manifest
+ModeConverter.archive_to_manifest("game.pak", "game.manifest")
 ```
 
-## 🔧 内置校验算法
+## 🔧 校验算法
+
+### 内置 (纯 Python)
 
 | Hook | 输出大小 | 说明 |
 |------|---------|------|
@@ -81,7 +92,22 @@ result = reader.extract_all("./output", progress_callback=on_progress)
 | `MD5Hook` | 16 bytes | 通用校验 |
 | `SHA1Hook` | 20 bytes | Git 使用 |
 | `SHA256Hook` | 32 bytes | 强校验 |
-| `QuickXorHashHook` | 20 bytes | OneDrive 快速哈希 |
+
+### RcloneHashHook (推荐，需安装 [rclone](https://rclone.org/))
+
+| 算法 | 输出大小 | 说明 |
+|------|---------|------|
+| `quickxor` | 20 bytes | OneDrive，速度最快 |
+| `md5` / `sha256` | 16/32 bytes | 标准算法 |
+| `blake3` | 32 bytes | 现代快速哈希 |
+| `xxh3` / `xxh128` | 8/16 bytes | 极速非加密哈希 |
+
+```python
+from grimoire import RcloneHashHook
+
+# 支持 13 种算法
+hook = RcloneHashHook("quickxor")  # 或 md5, sha256, blake3, xxh3...
+```
 
 ## 📖 文档
 
