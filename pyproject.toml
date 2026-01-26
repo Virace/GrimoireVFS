@@ -1,7 +1,49 @@
 [project]
 name = "grimoirevfs"
 version = "0.1.0"
-description = "构建一个轻量级、无依赖、高安全性的 Python 二进制资源管理库。"
+description = "轻量级零依赖 Python 二进制资源管理库，支持 Manifest 清单校验和 Archive 资源打包。"
 readme = "README.md"
-requires-python = ">=3.14"
+license = {text = "MIT"}
+requires-python = ">=3.7"
 dependencies = []
+keywords = ["vfs", "virtual-filesystem", "archive", "manifest", "resource", "game", "binary"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Archiving",
+    "Topic :: Games/Entertainment",
+]
+
+[project.urls]
+Homepage = "https://github.com/Virace/GrimoireVFS"
+Repository = "https://github.com/Virace/GrimoireVFS"
+Documentation = "https://github.com/Virace/GrimoireVFS/blob/main/docs/user_guide.md"
+
+[project.optional-dependencies]
+rclone = []  # RcloneHashHook 需要系统安装 rclone，无 Python 依赖
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["grimoire"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "grimoire/**/*.py",
+    "README.md",
+    "LICENSE",
+    "docs/**/*.md",
+]

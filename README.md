@@ -1,19 +1,30 @@
 # GrimoireVFS
 
+[![Python](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.1.0-orange.svg)](https://github.com/Virace/GrimoireVFS)
+
 轻量级零依赖 Python 二进制资源管理库。
 
 ## ✨ 特性
 
-- **零依赖**: 仅使用 Python 标准库
+- **零依赖**: 仅使用 Python 标准库 (3.7+)
 - **双模式**: Manifest (清单校验) / Archive (资源打包)
 - **高性能**: mmap 读取、批量操作、rclone 加速
 - **安全**: 索引加密、路径 Hash、校验算法可配置
 
 ## 📦 安装
 
-**当前不可用**
 ```bash
-pip install grimoire-vfs
+pip install grimoirevfs
+```
+
+或从源码安装:
+
+```bash
+git clone https://github.com/Virace/GrimoireVFS.git
+cd GrimoireVFS
+pip install .
 ```
 
 ## 🚀 快速开始
@@ -32,7 +43,7 @@ builder = ManifestBuilder(
 )
 
 # 批量添加 (使用 rclone 批量计算，1000+ 文件仅需 10 秒)
-result = builder.add_dir_batch_rclone("./assets", "/game/assets")
+result = builder.add_dir_batch_rclone("./assets", "game/assets")
 print(f"成功: {result.success_count}, 耗时: {result.elapsed_time:.1f}s")
 builder.build()
 
@@ -41,8 +52,7 @@ with ManifestReader("game.manifest",
     checksum_hook=RcloneHashHook("quickxor"),
     index_crypto=ZlibCompressHook()
 ) as reader:
-    is_valid = reader.verify_file("/game/assets/hero.png", "./assets/hero.png")
-```
+    is_valid = reader.verify_file("game/assets/hero.png", "./assets/hero.png")
 
 ### Archive 模式 (资源打包)
 
@@ -59,12 +69,12 @@ class ZlibHook:
 
 # 打包
 builder = ArchiveBuilder("game.pak", compression_hooks=[ZlibHook()])
-builder.add_dir("./assets", "/game", algo_id=1)
+builder.add_dir("./assets", "game", algo_id=1)
 builder.build()
 
 # 读取
 with ArchiveReader("game.pak", compression_hooks=[ZlibHook()]) as reader:
-    data = reader.read("/game/hero.png")
+    data = reader.read("game/hero.png")
 ```
 
 ### 格式转换
@@ -112,6 +122,10 @@ hook = RcloneHashHook("quickxor")  # 或 md5, sha256, blake3, xxh3...
 ## 📖 文档
 
 详细文档请参阅 [用户指南](docs/user_guide.md)。
+
+## 🤖 致谢
+
+本项目大部分代码由 [Claude Opus 4](https://www.anthropic.com/claude) (Anthropic) 辅助生成，Virace 负责需求设计、架构决策和代码审查。
 
 ## 📄 许可证
 

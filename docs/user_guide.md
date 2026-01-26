@@ -43,21 +43,22 @@ GrimoireVFS 是一个轻量级、零依赖的 Python 二进制资源管理库，
 ### PyPI 安装
 
 ```bash
-pip install grimoire-vfs
+pip install grimoirevfs
 ```
 
 ### 从源码安装
 
 ```bash
-git clone https://github.com/virace/grimoire-vfs.git
-cd grimoire-vfs
+git clone https://github.com/Virace/GrimoireVFS.git
+cd GrimoireVFS
 pip install -e .
 ```
 
 ### 依赖要求
 
-- Python 3.9+
+- Python 3.7+
 - 无第三方依赖
+- (可选) [rclone](https://rclone.org/) - 用于 RcloneHashHook 高性能哈希
 
 ---
 
