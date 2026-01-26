@@ -241,3 +241,98 @@ class ManifestBuilder:
     def path_stats(self) -> dict:
         """路径字典统计信息"""
         return self._path_dict.stats
+    
+    # ==================== 批量操作 API ====================
+    
+    def add_files_batch(
+        self,
+        items: 'List[FileItem] | Iterator[FileItem]',
+        on_error: str = 'raise',
+        progress_callback: Optional[Callable[['ProgressInfo'], None]] = None
+    ) -> 'BatchResult':
+        """
+        批量添加文件
+        
+        Args:
+            items: FileItem 列表或迭代器
+            on_error: 错误处理策略 ('raise', 'skip', 'abort')
+            progress_callback: 进度回调函数
+            
+        Returns:
+            BatchResult 批量操作结果
+        """
+        from ..core.batch import (
+            FileItem, ProgressInfo, BatchResult, ProgressTracker,
+            estimate_total_bytes
+        )
+        
+        # 转换为列表以获取总数
+        if not isinstance(items, list):
+            items = list(items)
+        
+        total_files = len(items)
+        total_bytes = estimate_total_bytes(items)
+        
+        tracker = ProgressTracker(
+            total_files=total_files,
+            total_bytes=total_bytes,
+            callback=progress_callback
+        )
+        
+        result = BatchResult()
+        
+        for item in items:
+            try:
+                file_size = os.path.getsize(item.local_path)
+                self.add_file(item.local_path, item.vfs_path)
+                result.success_count += 1
+                result.total_bytes += file_size
+                tracker.update(item.local_path, file_size)
+                
+            except Exception as e:
+                if on_error == 'raise':
+                    raise
+                elif on_error == 'skip':
+                    result.failed_count += 1
+                    result.failed_files.append((item.local_path, e))
+                    tracker.update(item.local_path, 0)
+                elif on_error == 'abort':
+                    result.failed_count += 1
+                    result.failed_files.append((item.local_path, e))
+                    break
+        
+        result.elapsed_time = tracker.finish()
+        return result
+    
+    def add_dir_batch(
+        self,
+        local_dir: str,
+        mount_point: str = "/",
+        recursive: bool = True,
+        exclude_patterns: Optional[List[str]] = None,
+        on_error: str = 'raise',
+        progress_callback: Optional[Callable[['ProgressInfo'], None]] = None
+    ) -> 'BatchResult':
+        """
+        批量添加目录 (带进度回调)
+        
+        Args:
+            local_dir: 本地目录路径
+            mount_point: 虚拟挂载点
+            recursive: 是否递归扫描
+            exclude_patterns: 排除的文件模式
+            on_error: 错误处理策略
+            progress_callback: 进度回调函数
+            
+        Returns:
+            BatchResult 批量操作结果
+        """
+        from ..core.batch import scan_directory, FileItem
+        
+        # 为 Manifest 模式创建 FileItem (algo_id 无用，设为 0)
+        items = list(scan_directory(
+            local_dir, mount_point, recursive, algo_id=0, exclude_patterns=exclude_patterns
+        ))
+        
+        return self.add_files_batch(items, on_error, progress_callback)
+
