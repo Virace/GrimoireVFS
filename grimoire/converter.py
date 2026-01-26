@@ -14,21 +14,28 @@ from .manifest import ManifestBuilder, ManifestReader
 from .archive import ArchiveBuilder, ArchiveReader
 from .hooks.base import ChecksumHook, IndexCryptoHook, CompressionHook
 from .hooks import (
-    NoneChecksumHook, CRC32Hook, MD5Hook, SHA1Hook, SHA256Hook, QuickXorHashHook,
+    NoneChecksumHook, CRC32Hook, MD5Hook, SHA1Hook, SHA256Hook,
     ZlibCompressHook, XorObfuscateHook, ZlibXorHook
 )
 from .utils import normalize_path
 
 
 # Hook 注册表 (用于 JSON 序列化/反序列化)
+# 内置 Hook
 CHECKSUM_HOOKS = {
     'none': NoneChecksumHook,
     'crc32': CRC32Hook,
     'md5': MD5Hook,
     'sha1': SHA1Hook,
     'sha256': SHA256Hook,
-    'quickxor': QuickXorHashHook,
 }
+
+# Rclone 支持的算法 (需要用户自行创建 RcloneHashHook 实例)
+# 可通过 json 中 checksum_hook: "rclone:quickxor" 格式指定
+RCLONE_ALGORITHMS = [
+    'md5', 'sha1', 'sha256', 'sha512', 'crc32', 'blake3',
+    'xxh3', 'xxh128', 'quickxor', 'dropbox', 'whirlpool', 'hidrive', 'mailru'
+]
 
 INDEX_CRYPTO_HOOKS = {
     'zlib': ZlibCompressHook,
@@ -41,10 +48,32 @@ def _get_hook_name(hook: Any, registry: Dict) -> Optional[str]:
     """获取 hook 的注册名称"""
     if hook is None:
         return None
+    
+    # 特殊处理 RcloneHashHook
+    from .hooks.rclone import RcloneHashHook
+    if isinstance(hook, RcloneHashHook):
+        return f"rclone:{hook.algorithm}"
+    
     for name, cls in registry.items():
         if isinstance(hook, cls):
             return name
     return None
+
+
+def _parse_hook_name(hook_name: str, registry: Dict) -> Optional[Any]:
+    """解析 hook 名称并创建实例"""
+    if hook_name is None:
+        return None
+    
+    # 处理 rclone:algorithm 格式
+    if hook_name.startswith('rclone:'):
+        from .hooks.rclone import RcloneHashHook
+        algorithm = hook_name.split(':', 1)[1]
+        return RcloneHashHook(algorithm, check_on_init=False)
+    
+    # 普通 hook
+    hook_cls = registry.get(hook_name)
+    return hook_cls() if hook_cls else None
 
 
 class ManifestJsonConverter:
@@ -146,16 +175,14 @@ class ManifestJsonConverter:
         if checksum_hook_override:
             checksum_hook = checksum_hook_override
         elif data.get('checksum_hook'):
-            hook_cls = CHECKSUM_HOOKS.get(data['checksum_hook'])
-            checksum_hook = hook_cls() if hook_cls else None
+            checksum_hook = _parse_hook_name(data['checksum_hook'], CHECKSUM_HOOKS)
         else:
             checksum_hook = None
         
         if index_crypto_override:
             index_crypto = index_crypto_override
         elif data.get('index_crypto'):
-            hook_cls = INDEX_CRYPTO_HOOKS.get(data['index_crypto'])
-            index_crypto = hook_cls() if hook_cls else None
+            index_crypto = _parse_hook_name(data['index_crypto'], INDEX_CRYPTO_HOOKS)
         else:
             index_crypto = None
         

@@ -90,14 +90,18 @@ class ManifestBuilder:
         # 5. 添加到字典
         dir_id, name_id, ext_id = self._path_dict.add_path(dir_part, name, ext)
         
-        # 6. 读取文件并计算校验值
-        with open(local_path, 'rb') as f:
-            data = f.read()
-        raw_size = len(data)
+        # 6. 获取文件大小和计算校验值
+        raw_size = os.path.getsize(local_path)
         
         checksum = b''
         if self._checksum_hook:
-            checksum = self._checksum_hook.compute(data)
+            # 优先使用 compute_file (如 RcloneHashHook)，避免双重 I/O
+            if hasattr(self._checksum_hook, 'compute_file'):
+                checksum = self._checksum_hook.compute_file(local_path)
+            else:
+                # 回退到读取内存
+                with open(local_path, 'rb') as f:
+                    checksum = self._checksum_hook.compute(f.read())
         
         # 7. 创建 Entry
         entry = ManifestEntry(
@@ -338,4 +342,105 @@ class ManifestBuilder:
         ))
         
         return self.add_files_batch(items, on_error, progress_callback)
+    
+    def add_dir_batch_rclone(
+        self,
+        local_dir: str,
+        mount_point: str = "/",
+        recursive: bool = True,
+        exclude_patterns: Optional[List[str]] = None,
+        progress_callback: Optional[Callable[['ProgressInfo'], None]] = None
+    ) -> 'BatchResult':
+        """
+        批量添加目录 (使用 rclone 批量计算哈希)
+        
+        此方法要求 checksum_hook 是 RcloneHashHook。
+        使用 rclone hashsum 一次性计算整个目录的哈希，性能最优。
+        
+        Args:
+            local_dir: 本地目录路径
+            mount_point: 虚拟挂载点
+            recursive: 是否递归扫描
+            exclude_patterns: 排除的文件模式
+            progress_callback: 进度回调函数
+            
+        Returns:
+            BatchResult 批量操作结果
+        """
+        from ..core.batch import scan_directory, BatchResult, ProgressTracker
+        from ..hooks.rclone import RcloneHashHook
+        
+        if not isinstance(self._checksum_hook, RcloneHashHook):
+            raise TypeError(
+                "add_dir_batch_rclone 要求 checksum_hook 是 RcloneHashHook。"
+                f"当前类型: {type(self._checksum_hook)}"
+            )
+        
+        local_dir = os.path.abspath(local_dir)
+        
+        # 1. 使用 rclone 批量计算整个目录的哈希
+        hash_map = self._checksum_hook.compute_dir(local_dir, recursive=recursive)
+        
+        # 2. 扫描目录获取文件列表
+        items = list(scan_directory(
+            local_dir, mount_point, recursive, algo_id=0, exclude_patterns=exclude_patterns
+        ))
+        
+        tracker = ProgressTracker(
+            total_files=len(items),
+            callback=progress_callback
+        )
+        
+        result = BatchResult()
+        
+        for item in items:
+            try:
+                # 获取相对路径作为 key
+                rel_path = os.path.relpath(item.local_path, local_dir)
+                rel_path = rel_path.replace('\\', '/')  # 统一路径分隔符
+                
+                raw_size = os.path.getsize(item.local_path)
+                
+                # 从预计算的哈希表获取
+                checksum = hash_map.get(rel_path, b'')
+                if not checksum:
+                    # 尝试其他可能的 key 格式
+                    for key in hash_map:
+                        if key.endswith(os.path.basename(item.local_path)):
+                            checksum = hash_map[key]
+                            break
+                
+                # 手动添加条目 (绕过 add_file 的校验计算)
+                normalized = normalize_path(item.vfs_path)
+                dir_part, name, ext = split_path(normalized)
+                path_hash = self._path_hash_func(normalized)
+                
+                if path_hash in self._hash_to_path:
+                    continue  # 跳过重复
+                
+                self._hash_to_path[path_hash] = normalized
+                dir_id, name_id, ext_id = self._path_dict.add_path(dir_part, name, ext)
+                
+                entry = ManifestEntry(
+                    path_hash=path_hash,
+                    dir_id=dir_id,
+                    name_id=name_id,
+                    ext_id=ext_id,
+                    raw_size=raw_size,
+                    checksum=checksum
+                )
+                self._entries.append(entry)
+                
+                result.success_count += 1
+                result.total_bytes += raw_size
+                tracker.update(item.local_path, raw_size)
+                
+            except Exception as e:
+                result.failed_count += 1
+                result.failed_files.append((item.local_path, e))
+                tracker.update(item.local_path, 0)
+        
+        result.elapsed_time = tracker.finish()
+        return result
+
 

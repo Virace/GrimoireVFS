@@ -41,10 +41,12 @@ from .hooks import (
     MD5Hook,
     SHA1Hook,
     SHA256Hook,
-    QuickXorHashHook,
     ZlibCompressHook,
     XorObfuscateHook,
     ZlibXorHook,
+    RcloneHashHook,
+    RcloneNotFoundError,
+    rclone_hash,
 )
 
 __all__ = [
@@ -78,9 +80,12 @@ __all__ = [
     "MD5Hook",
     "SHA1Hook",
     "SHA256Hook",
-    "QuickXorHashHook",
     "ZlibCompressHook",
     "XorObfuscateHook",
     "ZlibXorHook",
+    "RcloneHashHook",
+    "RcloneNotFoundError",
+    "rclone_hash",
 ]
+
 

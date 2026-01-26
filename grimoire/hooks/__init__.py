@@ -8,10 +8,10 @@ GrimoireVFS Hook 系统
 
 from .base import CompressionHook, ChecksumHook, IndexCryptoHook, PathHashHook
 from .checksum import (
-    NoneChecksumHook, CRC32Hook, MD5Hook, SHA1Hook, SHA256Hook,
-    QuickXorHash, QuickXorHashHook
+    NoneChecksumHook, CRC32Hook, MD5Hook, SHA1Hook, SHA256Hook
 )
 from .crypto import ZlibCompressHook, XorObfuscateHook, ZlibXorHook
+from .rclone import RcloneHashHook, RcloneNotFoundError, rclone_hash
 
 __all__ = [
     # 抽象基类
@@ -25,12 +25,15 @@ __all__ = [
     "MD5Hook",
     "SHA1Hook",
     "SHA256Hook",
-    "QuickXorHash",
-    "QuickXorHashHook",
     # 索引压缩/混淆
     "ZlibCompressHook",
     "XorObfuscateHook",
     "ZlibXorHook",
+    # Rclone 兼容
+    "RcloneHashHook",
+    "RcloneNotFoundError",
+    "rclone_hash",
 ]
+
 
 
