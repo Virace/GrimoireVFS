@@ -206,6 +206,61 @@ class ManifestReader:
             result.append(full_path)
         return result
     
+    def get_all_entries(self) -> List[Dict]:
+        """
+        获取所有条目的元信息
+        
+        返回每个条目的路径、大小、校验信息，不包含二进制数据。
+        
+        Returns:
+            条目信息列表，每个元素包含:
+            - path: 虚拟路径
+            - size: 文件大小
+            - checksum: 校验值 (bytes)
+            - checksum_hex: 校验值 (hex字符串)
+            
+        Raises:
+            IndexNotDecryptedError: 索引未解密时无法遍历
+            
+        Example:
+            >>> for entry in reader.get_all_entries():
+            ...     print(f"{entry['path']}: {entry['size']} bytes")
+        """
+        if not self._index_decrypted:
+            raise IndexNotDecryptedError()
+        
+        result = []
+        for entry in self._entries.values():
+            full_path = self._path_dict.get_path(
+                entry.dir_id, entry.name_id, entry.ext_id
+            )
+            result.append({
+                'path': full_path,
+                'size': entry.raw_size,
+                'checksum': entry.checksum,
+                'checksum_hex': entry.checksum.hex() if entry.checksum else '',
+            })
+        return result
+    
+    def iter_entries(self):
+        """
+        迭代所有条目 (生成器模式，内存友好)
+        
+        Yields:
+            (path, entry) 元组
+            
+        Raises:
+            IndexNotDecryptedError: 索引未解密时无法遍历
+        """
+        if not self._index_decrypted:
+            raise IndexNotDecryptedError()
+        
+        for entry in self._entries.values():
+            full_path = self._path_dict.get_path(
+                entry.dir_id, entry.name_id, entry.ext_id
+            )
+            yield full_path, entry
+    
     def list_hashes(self) -> List[int]:
         """
         列出所有路径 Hash

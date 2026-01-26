@@ -11,28 +11,31 @@ import hashlib
 from typing import Tuple
 
 
-def normalize_path(path: str) -> str:
+def normalize_path(path: str, absolute: bool = False) -> str:
     """
     路径规范化
     
     1. 反斜杠统一为正斜杠
-    2. 确保以 / 开头
-    3. 移除末尾斜杠
-    4. 合并连续斜杠
+    2. 移除末尾斜杠
+    3. 合并连续斜杠
+    4. 可选: 以 / 开头 (absolute=True)
     
     Args:
         path: 原始路径
+        absolute: 是否以 / 开头 (绝对路径模式)，默认 False
         
     Returns:
         规范化后的路径
         
     Examples:
         >>> normalize_path("Game\\\\MOD\\\\hero.wad")
-        '/Game/MOD/hero.wad'
+        'Game/MOD/hero.wad'
         >>> normalize_path("/Game/MOD/")
-        '/Game/MOD'
+        'Game/MOD'
         >>> normalize_path("hero.wad")
-        '/hero.wad'
+        'hero.wad'
+        >>> normalize_path("Game/MOD", absolute=True)
+        '/Game/MOD'
     """
     # 反斜杠 → 正斜杠
     path = path.replace("\\", "/")
@@ -41,13 +44,20 @@ def normalize_path(path: str) -> str:
     while "//" in path:
         path = path.replace("//", "/")
     
-    # 确保以 / 开头
-    if not path.startswith("/"):
-        path = "/" + path
-    
     # 移除末尾斜杠 (除非是根目录)
-    if len(path) > 1:
-        path = path.rstrip("/")
+    path = path.rstrip("/")
+    
+    # 移除开头斜杠 (默认相对路径)
+    if not absolute:
+        path = path.lstrip("/")
+    else:
+        # 确保以 / 开头
+        if not path.startswith("/"):
+            path = "/" + path
+    
+    # 处理空路径
+    if not path:
+        path = "/" if absolute else ""
     
     return path
 
