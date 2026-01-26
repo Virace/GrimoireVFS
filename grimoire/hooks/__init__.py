@@ -11,6 +11,7 @@ from .checksum import (
     NoneChecksumHook, CRC32Hook, MD5Hook, SHA1Hook, SHA256Hook,
     QuickXorHash, QuickXorHashHook
 )
+from .crypto import ZlibCompressHook, XorObfuscateHook, ZlibXorHook
 
 __all__ = [
     # 抽象基类
@@ -26,5 +27,10 @@ __all__ = [
     "SHA256Hook",
     "QuickXorHash",
     "QuickXorHashHook",
+    # 索引压缩/混淆
+    "ZlibCompressHook",
+    "XorObfuscateHook",
+    "ZlibXorHook",
 ]
+
 

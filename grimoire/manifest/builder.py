@@ -180,21 +180,24 @@ class ManifestBuilder:
             self._path_dict.pack(writer)
             string_size = writer.position - string_start
             
-            # 如果需要加密
+            # 如果需要加密/压缩
             if self._index_crypto:
                 # 读回 String Tables 数据
                 f.seek(string_start)
                 string_data = f.read(string_size)
                 
-                # 加密
+                # 加密/压缩
                 encrypted = self._index_crypto.encrypt(string_data)
                 
                 # 重写
                 f.seek(string_start)
                 f.write(encrypted)
                 
-                # 更新位置 (加密后大小可能不变，但处理边界情况)
-                writer.seek(string_start + len(encrypted))
+                # 更新 string_size 为压缩后的大小！
+                string_size = len(encrypted)
+                
+                # 更新位置
+                writer.seek(string_start + string_size)
             
             # ========== 4. 写入 Entry Table ==========
             checksum_size = self._checksum_hook.digest_size if self._checksum_hook else 0
@@ -209,7 +212,7 @@ class ManifestBuilder:
                 dir_count=len(self._path_dict.dirs),
                 name_count=len(self._path_dict.names),
                 ext_count=len(self._path_dict.exts),
-                string_table_size=string_size,
+                string_table_size=string_size,  # 这里现在是正确的压缩后大小
                 checksum_size=checksum_size
             )
             writer.seek(index_start)
