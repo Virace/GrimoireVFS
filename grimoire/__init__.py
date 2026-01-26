@@ -28,6 +28,9 @@ from .manifest import ManifestBuilder, ManifestReader
 # Archive Mode
 from .archive import ArchiveBuilder, ArchiveReader
 
+# 格式转换
+from .converter import ManifestJsonConverter, ModeConverter
+
 # Hooks
 from .hooks import (
     CompressionHook,
@@ -39,6 +42,9 @@ from .hooks import (
     SHA1Hook,
     SHA256Hook,
     QuickXorHashHook,
+    ZlibCompressHook,
+    XorObfuscateHook,
+    ZlibXorHook,
 )
 
 __all__ = [
@@ -60,6 +66,9 @@ __all__ = [
     # Archive
     "ArchiveBuilder",
     "ArchiveReader",
+    # 格式转换
+    "ManifestJsonConverter",
+    "ModeConverter",
     # Hooks
     "CompressionHook",
     "ChecksumHook",
@@ -70,4 +79,8 @@ __all__ = [
     "SHA1Hook",
     "SHA256Hook",
     "QuickXorHashHook",
+    "ZlibCompressHook",
+    "XorObfuscateHook",
+    "ZlibXorHook",
 ]
+

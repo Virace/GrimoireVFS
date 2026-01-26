@@ -1,0 +1,392 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+格式转换工具
+
+提供 Manifest/Archive/JSON 之间的互转功能。
+"""
+
+import json
+import os
+from typing import Optional, Dict, List, Callable, Any
+
+from .manifest import ManifestBuilder, ManifestReader
+from .archive import ArchiveBuilder, ArchiveReader
+from .hooks.base import ChecksumHook, IndexCryptoHook, CompressionHook
+from .hooks import (
+    NoneChecksumHook, CRC32Hook, MD5Hook, SHA1Hook, SHA256Hook, QuickXorHashHook,
+    ZlibCompressHook, XorObfuscateHook, ZlibXorHook
+)
+from .utils import normalize_path
+
+
+# Hook 注册表 (用于 JSON 序列化/反序列化)
+CHECKSUM_HOOKS = {
+    'none': NoneChecksumHook,
+    'crc32': CRC32Hook,
+    'md5': MD5Hook,
+    'sha1': SHA1Hook,
+    'sha256': SHA256Hook,
+    'quickxor': QuickXorHashHook,
+}
+
+INDEX_CRYPTO_HOOKS = {
+    'zlib': ZlibCompressHook,
+    'xor': XorObfuscateHook,
+    'zlib_xor': ZlibXorHook,
+}
+
+
+def _get_hook_name(hook: Any, registry: Dict) -> Optional[str]:
+    """获取 hook 的注册名称"""
+    if hook is None:
+        return None
+    for name, cls in registry.items():
+        if isinstance(hook, cls):
+            return name
+    return None
+
+
+class ManifestJsonConverter:
+    """
+    Manifest 和 JSON 互转
+    
+    JSON 格式:
+    {
+        "version": 1,
+        "magic": "GRIM",
+        "checksum_hook": "md5",
+        "index_crypto": "zlib",
+        "entries": [
+            {
+                "path": "/game/hero.png",
+                "size": 12345,
+                "checksum": "abc123..."
+            },
+            ...
+        ]
+    }
+    """
+    
+    @staticmethod
+    def manifest_to_json(
+        manifest_path: str,
+        output_path: str,
+        checksum_hook: Optional[ChecksumHook] = None,
+        index_crypto: Optional[IndexCryptoHook] = None,
+        indent: int = 2
+    ) -> None:
+        """
+        将 Manifest 转换为 JSON 文件
+        
+        Args:
+            manifest_path: Manifest 文件路径
+            output_path: 输出 JSON 文件路径
+            checksum_hook: 校验 Hook (需与创建时一致)
+            index_crypto: 索引解密 Hook (需与创建时一致)
+            indent: JSON 缩进
+        """
+        with ManifestReader(
+            manifest_path,
+            checksum_hook=checksum_hook,
+            index_crypto=index_crypto
+        ) as reader:
+            entries = []
+            for path in reader.list_all():
+                entry = reader.get_entry(path)
+                entries.append({
+                    'path': path,
+                    'size': entry.raw_size,
+                    'checksum': entry.checksum.hex() if entry.checksum else None
+                })
+            
+            data = {
+                'version': 1,
+                'magic': reader.file_header.magic.decode('ascii', errors='ignore').rstrip('\x00'),
+                'checksum_hook': _get_hook_name(checksum_hook, CHECKSUM_HOOKS),
+                'index_crypto': _get_hook_name(index_crypto, INDEX_CRYPTO_HOOKS),
+                'entry_count': len(entries),
+                'entries': entries
+            }
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=indent)
+    
+    @staticmethod
+    def json_to_manifest(
+        json_path: str,
+        output_path: str,
+        local_base_path: str,
+        path_mappings: Optional[Dict[str, str]] = None,
+        checksum_hook_override: Optional[ChecksumHook] = None,
+        index_crypto_override: Optional[IndexCryptoHook] = None,
+        progress_callback: Optional[Callable] = None
+    ) -> 'BatchResult':
+        """
+        将 JSON 转换为 Manifest 文件
+        
+        Args:
+            json_path: JSON 文件路径
+            output_path: 输出 Manifest 文件路径
+            local_base_path: 本地文件基础路径
+            path_mappings: 虚拟路径映射 {虚拟前缀: 本地前缀}
+            checksum_hook_override: 覆盖 JSON 中指定的校验 Hook
+            index_crypto_override: 覆盖 JSON 中指定的索引加密 Hook
+            progress_callback: 进度回调
+            
+        Returns:
+            BatchResult
+        """
+        from .core.batch import FileItem, BatchResult, ProgressTracker
+        
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # 解析 Hook
+        if checksum_hook_override:
+            checksum_hook = checksum_hook_override
+        elif data.get('checksum_hook'):
+            hook_cls = CHECKSUM_HOOKS.get(data['checksum_hook'])
+            checksum_hook = hook_cls() if hook_cls else None
+        else:
+            checksum_hook = None
+        
+        if index_crypto_override:
+            index_crypto = index_crypto_override
+        elif data.get('index_crypto'):
+            hook_cls = INDEX_CRYPTO_HOOKS.get(data['index_crypto'])
+            index_crypto = hook_cls() if hook_cls else None
+        else:
+            index_crypto = None
+        
+        # 创建路径解析函数
+        def resolve_local_path(vfs_path: str) -> str:
+            if path_mappings:
+                for vfs_prefix, local_prefix in path_mappings.items():
+                    if vfs_path.startswith(vfs_prefix):
+                        rel = vfs_path[len(vfs_prefix):].lstrip('/')
+                        return os.path.join(local_prefix, rel)
+            # 默认: base_path + vfs_path
+            return os.path.join(local_base_path, vfs_path.lstrip('/'))
+        
+        # 构建 Manifest
+        magic = data.get('magic', 'GRIM').encode('ascii')[:4].ljust(4, b'\x00')
+        builder = ManifestBuilder(
+            output_path,
+            magic=magic,
+            checksum_hook=checksum_hook,
+            index_crypto=index_crypto
+        )
+        
+        entries = data.get('entries', [])
+        tracker = ProgressTracker(
+            total_files=len(entries),
+            callback=progress_callback
+        )
+        
+        result = BatchResult()
+        
+        for entry in entries:
+            vfs_path = entry['path']
+            local_path = resolve_local_path(vfs_path)
+            
+            try:
+                builder.add_file(local_path, vfs_path)
+                result.success_count += 1
+                result.total_bytes += os.path.getsize(local_path)
+                tracker.update(local_path, os.path.getsize(local_path))
+            except Exception as e:
+                result.failed_count += 1
+                result.failed_files.append((local_path, e))
+                tracker.update(local_path, 0)
+        
+        builder.build()
+        result.elapsed_time = tracker.finish()
+        return result
+
+
+class ModeConverter:
+    """
+    Manifest 和 Archive 模式互转
+    """
+    
+    @staticmethod
+    def archive_to_manifest(
+        archive_path: str,
+        output_path: str,
+        compression_hooks: Optional[List[CompressionHook]] = None,
+        checksum_hook: Optional[ChecksumHook] = None,
+        index_crypto_read: Optional[IndexCryptoHook] = None,
+        # 输出配置
+        output_checksum_hook: Optional[ChecksumHook] = None,
+        output_index_crypto: Optional[IndexCryptoHook] = None,
+        progress_callback: Optional[Callable] = None
+    ) -> 'BatchResult':
+        """
+        将 Archive 转换为 Manifest
+        
+        仅保留元信息，不包含文件数据。
+        
+        Args:
+            archive_path: Archive 文件路径
+            output_path: 输出 Manifest 文件路径
+            compression_hooks: Archive 解压 Hook
+            checksum_hook: Archive 校验 Hook
+            index_crypto_read: Archive 索引解密 Hook
+            output_checksum_hook: 输出 Manifest 校验 Hook (默认继承)
+            output_index_crypto: 输出 Manifest 索引加密 Hook (默认不加密)
+            progress_callback: 进度回调
+            
+        Returns:
+            BatchResult
+        """
+        from .core.batch import BatchResult, ProgressTracker
+        
+        # 使用继承的 checksum_hook
+        if output_checksum_hook is None:
+            output_checksum_hook = checksum_hook
+        
+        with ArchiveReader(
+            archive_path,
+            compression_hooks=compression_hooks,
+            checksum_hook=checksum_hook,
+            index_crypto=index_crypto_read
+        ) as reader:
+            all_paths = reader.list_all()
+            
+            builder = ManifestBuilder(
+                output_path,
+                magic=reader.file_header.magic,
+                checksum_hook=output_checksum_hook,
+                index_crypto=output_index_crypto
+            )
+            
+            tracker = ProgressTracker(
+                total_files=len(all_paths),
+                callback=progress_callback
+            )
+            
+            result = BatchResult()
+            
+            for vfs_path in all_paths:
+                try:
+                    # 从 Archive 读取数据并计算校验
+                    data = reader.read(vfs_path, verify=False)
+                    
+                    # 手动添加条目 (绕过 add_file 的本地文件检查)
+                    normalized = normalize_path(vfs_path)
+                    from .utils import split_path, default_path_hash
+                    dir_part, name, ext = split_path(normalized)
+                    
+                    path_hash = default_path_hash(normalized)
+                    dir_id, name_id, ext_id = builder._path_dict.add_path(dir_part, name, ext)
+                    
+                    checksum = b''
+                    if output_checksum_hook:
+                        checksum = output_checksum_hook.compute(data)
+                    
+                    from .core.schema import ManifestEntry
+                    entry = ManifestEntry(
+                        path_hash=path_hash,
+                        dir_id=dir_id,
+                        name_id=name_id,
+                        ext_id=ext_id,
+                        raw_size=len(data),
+                        checksum=checksum
+                    )
+                    builder._entries.append(entry)
+                    builder._hash_to_path[path_hash] = normalized
+                    
+                    result.success_count += 1
+                    result.total_bytes += len(data)
+                    tracker.update(vfs_path, len(data))
+                    
+                except Exception as e:
+                    result.failed_count += 1
+                    result.failed_files.append((vfs_path, e))
+                    tracker.update(vfs_path, 0)
+            
+            builder.build()
+            result.elapsed_time = tracker.finish()
+            return result
+    
+    @staticmethod
+    def manifest_to_archive(
+        manifest_path: str,
+        output_path: str,
+        local_base_path: str,
+        path_mappings: Optional[Dict[str, str]] = None,
+        checksum_hook_read: Optional[ChecksumHook] = None,
+        index_crypto_read: Optional[IndexCryptoHook] = None,
+        # 输出配置
+        compression_hooks: Optional[List[CompressionHook]] = None,
+        default_algo_id: int = 0,
+        output_checksum_hook: Optional[ChecksumHook] = None,
+        output_index_crypto: Optional[IndexCryptoHook] = None,
+        progress_callback: Optional[Callable] = None,
+        on_error: str = 'skip'
+    ) -> 'BatchResult':
+        """
+        将 Manifest 转换为 Archive
+        
+        需要提供本地文件路径来读取实际数据。
+        
+        Args:
+            manifest_path: Manifest 文件路径
+            output_path: 输出 Archive 文件路径
+            local_base_path: 本地文件基础路径
+            path_mappings: 虚拟路径映射 {虚拟前缀: 本地前缀}
+            checksum_hook_read: Manifest 校验 Hook
+            index_crypto_read: Manifest 索引解密 Hook
+            compression_hooks: 输出 Archive 压缩 Hook 列表
+            default_algo_id: 默认压缩算法 ID
+            output_checksum_hook: 输出 Archive 校验 Hook
+            output_index_crypto: 输出 Archive 索引加密 Hook
+            progress_callback: 进度回调
+            on_error: 错误处理策略
+            
+        Returns:
+            BatchResult
+        """
+        from .core.batch import FileItem
+        
+        # 创建路径解析函数
+        def resolve_local_path(vfs_path: str) -> str:
+            if path_mappings:
+                for vfs_prefix, local_prefix in path_mappings.items():
+                    if vfs_path.startswith(vfs_prefix):
+                        rel = vfs_path[len(vfs_prefix):].lstrip('/')
+                        return os.path.join(local_prefix, rel)
+            return os.path.join(local_base_path, vfs_path.lstrip('/'))
+        
+        with ManifestReader(
+            manifest_path,
+            checksum_hook=checksum_hook_read,
+            index_crypto=index_crypto_read
+        ) as reader:
+            # 构建 FileItem 列表
+            items = []
+            for vfs_path in reader.list_all():
+                local_path = resolve_local_path(vfs_path)
+                items.append(FileItem(
+                    local_path=local_path,
+                    vfs_path=vfs_path,
+                    algo_id=default_algo_id
+                ))
+        
+        # 创建 Archive
+        builder = ArchiveBuilder(
+            output_path,
+            compression_hooks=compression_hooks,
+            checksum_hook=output_checksum_hook,
+            index_crypto=output_index_crypto
+        )
+        
+        result = builder.add_files_batch(
+            items,
+            on_error=on_error,
+            progress_callback=progress_callback
+        )
+        
+        builder.build()
+        return result
