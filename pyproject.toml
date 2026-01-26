@@ -1,0 +1,7 @@
+[project]
+name = "grimoirevfs"
+version = "0.1.0"
+description = "构建一个轻量级、无依赖、高安全性的 Python 二进制资源管理库。"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
