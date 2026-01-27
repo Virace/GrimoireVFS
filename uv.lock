@@ -1,8 +1,11 @@
 version = 1
 revision = 3
-requires-python = ">=3.14"
+requires-python = ">=3.7"
 
 [[package]]
 name = "grimoirevfs"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
+
+[package.metadata]
+provides-extras = ["rclone"]
