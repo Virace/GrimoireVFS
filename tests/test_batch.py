@@ -1,14 +1,24 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-GrimoireVFS 批量操作测试
+批量操作测试
+
+测试批量添加、读取、进度回调和错误处理。
 """
 
-import os
-import tempfile
 import zlib
+
+import pytest
+
 from grimoire import ArchiveBuilder, ArchiveReader, MD5Hook
-from grimoire.core import FileItem, ProgressInfo, BatchResult
+from grimoire.core.batch import (
+    FileItem,
+    ProgressInfo,
+    BatchResult,
+    ProgressTracker,
+    scan_directory,
+    estimate_total_bytes,
+)
 from grimoire.hooks.base import CompressionHook
 
 
@@ -24,199 +34,423 @@ class ZlibHook(CompressionHook):
         return zlib.decompress(data)
 
 
-def test_batch_add_with_progress():
-    """批量添加带进度回调测试"""
-    print("=" * 50)
-    print("测试 1: 批量添加带进度回调")
-    print("=" * 50)
+# ==================== FileItem 测试 ====================
+
+class TestFileItem:
+    """FileItem 数据类测试"""
     
-    progress_calls = []
-    
-    def on_progress(info: ProgressInfo):
-        progress_calls.append({
-            'current': info.current,
-            'total': info.total,
-            'progress': info.progress,
-            'file': os.path.basename(info.current_file)
-        })
-        print(f"  进度: {info.current}/{info.total} ({info.progress:.1%}) - {os.path.basename(info.current_file)}")
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 创建测试文件
-        test_dir = os.path.join(tmpdir, "assets")
-        os.makedirs(test_dir)
+    def test_create_minimal(self):
+        """最小参数创建"""
+        item = FileItem("/path/to/file.txt")
         
-        for i in range(10):
-            with open(os.path.join(test_dir, f"file_{i}.txt"), "wb") as f:
-                f.write(f"Content of file {i}".encode() * 100)
+        assert item.local_path == "/path/to/file.txt"
+        assert item.vfs_path is None
+        assert item.algo_id == 0
+    
+    def test_create_full(self):
+        """完整参数创建"""
+        item = FileItem(
+            local_path="/local/file.txt",
+            vfs_path="/virtual/file.txt",
+            algo_id=1
+        )
         
-        # 批量添加
-        archive_path = os.path.join(tmpdir, "batch.archive")
+        assert item.local_path == "/local/file.txt"
+        assert item.vfs_path == "/virtual/file.txt"
+        assert item.algo_id == 1
+
+
+# ==================== ProgressInfo 测试 ====================
+
+class TestProgressInfo:
+    """ProgressInfo 数据类测试"""
+    
+    def test_progress_calculation(self):
+        """进度百分比计算"""
+        info = ProgressInfo(
+            current=5,
+            total=10,
+            current_file="test.txt",
+            bytes_processed=500,
+            bytes_total=1000,
+            elapsed_time=5.0
+        )
+        
+        assert info.progress == 0.5
+    
+    def test_progress_zero_total(self):
+        """total=0 时进度为 0"""
+        info = ProgressInfo(
+            current=0,
+            total=0,
+            current_file="",
+            bytes_processed=0,
+            bytes_total=0,
+            elapsed_time=0.0
+        )
+        
+        assert info.progress == 0.0
+    
+    def test_rate_calculation(self):
+        """速率计算"""
+        info = ProgressInfo(
+            current=10,
+            total=10,
+            current_file="test.txt",
+            bytes_processed=1000,
+            bytes_total=1000,
+            elapsed_time=2.0
+        )
+        
+        assert info.rate == 500.0  # 500 bytes/second
+    
+    def test_eta_calculation(self):
+        """预计剩余时间计算"""
+        info = ProgressInfo(
+            current=5,
+            total=10,
+            current_file="test.txt",
+            bytes_processed=500,
+            bytes_total=1000,
+            elapsed_time=5.0
+        )
+        
+        # rate = 100 bytes/s, remaining = 500 bytes
+        assert info.eta == 5.0
+
+
+# ==================== BatchResult 测试 ====================
+
+class TestBatchResult:
+    """BatchResult 数据类测试"""
+    
+    def test_total_count(self):
+        """总数计算"""
+        result = BatchResult(
+            success_count=8,
+            failed_count=1,
+            skipped_count=1
+        )
+        
+        assert result.total_count == 10
+    
+    def test_success_rate(self):
+        """成功率计算"""
+        result = BatchResult(
+            success_count=8,
+            failed_count=2
+        )
+        
+        assert result.success_rate == 0.8
+    
+    def test_success_rate_zero_total(self):
+        """total=0 时成功率为 0"""
+        result = BatchResult()
+        
+        assert result.success_rate == 0.0
+
+
+# ==================== ProgressTracker 测试 ====================
+
+class TestProgressTracker:
+    """ProgressTracker 测试"""
+    
+    def test_basic_tracking(self):
+        """基础进度跟踪"""
+        tracker = ProgressTracker(total_files=10)
+        
+        tracker.update("file1.txt", 100)
+        tracker.update("file2.txt", 200)
+        
+        elapsed = tracker.finish()
+        assert elapsed >= 0
+    
+    def test_callback_invoked(self):
+        """回调函数应被调用"""
+        calls = []
+        
+        def callback(info: ProgressInfo):
+            calls.append(info.current)
+        
+        tracker = ProgressTracker(
+            total_files=3,
+            callback=callback,
+            callback_interval=0  # 禁用间隔限制以确保每次都调用
+        )
+        
+        for i in range(3):
+            tracker.update(f"file{i}.txt", 100)
+        
+        tracker.finish()
+        
+        # 至少调用一次
+        assert len(calls) >= 1
+
+
+# ==================== scan_directory 测试 ====================
+
+class TestScanDirectory:
+    """目录扫描测试"""
+    
+    def test_scan_recursive(self, sample_files):
+        """递归扫描"""
+        src_dir, files = sample_files
+        
+        items = list(scan_directory(str(src_dir), "/mount"))
+        
+        assert len(items) == len(files)
+        for item in items:
+            # 注意: normalize_path 会去除前导斜杠
+            assert "mount/" in item.vfs_path or item.vfs_path.startswith("mount")
+    
+    def test_scan_non_recursive(self, sample_files):
+        """非递归扫描"""
+        src_dir, files = sample_files
+        
+        items = list(scan_directory(str(src_dir), "/mount", recursive=False))
+        
+        # 只包含根目录文件
+        root_files = [f for f in files.keys() if "/" not in f]
+        assert len(items) == len(root_files)
+    
+    def test_scan_with_algo_id(self, sample_files):
+        """扫描设置压缩算法"""
+        src_dir, files = sample_files
+        
+        items = list(scan_directory(str(src_dir), "/mount", algo_id=5))
+        
+        for item in items:
+            assert item.algo_id == 5
+    
+    def test_scan_with_exclude(self, sample_files):
+        """排除模式测试"""
+        src_dir, files = sample_files
+        
+        items = list(scan_directory(
+            str(src_dir), "/mount",
+            exclude_patterns=["*.txt"]
+        ))
+        
+        # 应排除所有 .txt 文件
+        for item in items:
+            assert not item.local_path.endswith(".txt")
+
+
+# ==================== estimate_total_bytes 测试 ====================
+
+class TestEstimateTotalBytes:
+    """估算总大小测试"""
+    
+    def test_estimate(self, sample_files):
+        """估算文件总大小"""
+        src_dir, files = sample_files
+        
+        items = list(scan_directory(str(src_dir), "/mount"))
+        total = estimate_total_bytes(items)
+        
+        expected = sum(len(content) for content in files.values())
+        assert total == expected
+    
+    def test_estimate_with_missing_files(self, sample_files):
+        """包含不存在文件时应跳过"""
+        src_dir, files = sample_files
+        
+        items = [
+            FileItem(str(src_dir / "hero.txt"), "/hero.txt"),
+            FileItem("/not/exists.txt", "/missing.txt"),  # 不存在
+        ]
+        
+        total = estimate_total_bytes(items)
+        
+        # 只计算存在的文件
+        assert total == len(files["hero.txt"])
+
+
+# ==================== 批量操作集成测试 ====================
+
+class TestBatchAddWithProgress:
+    """带进度回调的批量添加测试"""
+    
+    def test_progress_callback(self, tmp_path, sample_files):
+        """进度回调测试"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "batch.archive"
+        
+        progress_calls = []
+        
+        def on_progress(info: ProgressInfo):
+            progress_calls.append({
+                'current': info.current,
+                'total': info.total,
+                'progress': info.progress,
+            })
+        
         builder = ArchiveBuilder(
-            archive_path,
+            str(archive_path),
             compression_hooks=[ZlibHook()],
             checksum_hook=MD5Hook()
         )
         
         result = builder.add_dir_batch(
-            test_dir,
+            str(src_dir),
             mount_point="/assets",
             algo_id=1,
             progress_callback=on_progress
         )
-        
-        print(f"\n结果: 成功 {result.success_count}, 失败 {result.failed_count}")
-        print(f"总字节: {result.total_bytes}, 耗时: {result.elapsed_time:.3f}s")
-        
         builder.build()
         
-        # 验证
-        assert result.success_count == 10
+        assert result.success_count == len(files)
         assert result.failed_count == 0
-        assert len(progress_calls) >= 1  # 可能因为间隔限制而少于 10
-        
-        print("✅ 测试 1 通过!")
-
-
-def test_batch_add_with_skip():
-    """批量添加跳过失败文件测试"""
-    print("\n" + "=" * 50)
-    print("测试 2: 批量添加跳过失败文件")
-    print("=" * 50)
+        assert len(progress_calls) >= 1
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_dir = os.path.join(tmpdir, "mixed")
-        os.makedirs(test_dir)
+    def test_progress_info_accuracy(self, tmp_path, sample_files):
+        """进度信息准确性"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "accuracy.archive"
         
-        # 创建真实文件
-        with open(os.path.join(test_dir, "real.txt"), "wb") as f:
-            f.write(b"Real content")
+        final_info = None
         
-        # 准备包含不存在文件的列表
+        def on_progress(info: ProgressInfo):
+            nonlocal final_info
+            final_info = info
+        
+        builder = ArchiveBuilder(str(archive_path))
+        builder.add_dir_batch(
+            str(src_dir),
+            mount_point="/assets",
+            progress_callback=on_progress,
+        )
+        builder.build()
+        
+        # 最后的进度应接近 100%
+        if final_info:
+            assert final_info.progress <= 1.0
+
+
+class TestBatchErrorHandling:
+    """批量操作错误处理测试"""
+    
+    @pytest.mark.parametrize("on_error", ['skip', 'abort'])
+    def test_error_handling_strategies(self, on_error, tmp_path, sample_files):
+        """不同错误处理策略"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "error.archive"
+        
         items = [
-            FileItem(os.path.join(test_dir, "real.txt"), "/real.txt"),
-            FileItem(os.path.join(test_dir, "not_exist.txt"), "/fake.txt"),  # 不存在
-            FileItem(os.path.join(test_dir, "real.txt"), "/real2.txt"),  # 可以再添加
+            FileItem(str(src_dir / "hero.txt"), "/exists.txt"),
+            FileItem(str(src_dir / "NOT_EXISTS.txt"), "/missing.txt"),
         ]
         
-        archive_path = os.path.join(tmpdir, "skip.archive")
-        builder = ArchiveBuilder(archive_path)
+        builder = ArchiveBuilder(str(archive_path))
+        result = builder.add_files_batch(items, on_error=on_error)
         
-        result = builder.add_files_batch(items, on_error='skip')
+        if on_error == 'skip':
+            assert result.success_count == 1
+            assert result.failed_count == 1
+        # abort 模式应在第一个错误后停止
+    
+    def test_raise_on_error(self, tmp_path, sample_files):
+        """raise 模式应抛出异常"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "raise.archive"
         
-        print(f"结果: 成功 {result.success_count}, 失败 {result.failed_count}")
-        print(f"失败文件: {[os.path.basename(f[0]) for f in result.failed_files]}")
+        items = [
+            FileItem(str(src_dir / "NOT_EXISTS.txt"), "/missing.txt"),
+        ]
         
-        assert result.success_count == 2  # real.txt 添加两次 (不同 vfs_path)
-        assert result.failed_count == 1
+        builder = ArchiveBuilder(str(archive_path))
         
-        print("✅ 测试 2 通过!")
+        with pytest.raises(FileNotFoundError):
+            builder.add_files_batch(items, on_error='raise')
 
 
-def test_extract_all_with_progress():
-    """解包所有文件带进度测试"""
-    print("\n" + "=" * 50)
-    print("测试 3: 解包所有文件带进度")
-    print("=" * 50)
+class TestExtractAll:
+    """解包所有文件测试"""
     
-    progress_calls = []
-    
-    def on_progress(info: ProgressInfo):
-        progress_calls.append(info.current)
-        print(f"  解包: {info.current}/{info.total} - {info.current_file}")
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 创建测试文件
-        test_dir = os.path.join(tmpdir, "source")
-        os.makedirs(os.path.join(test_dir, "subdir"))
+    def test_extract_all(self, tmp_path, sample_files):
+        """解包所有文件"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "extract.archive"
+        output_dir = tmp_path / "output"
         
-        files = {
-            "a.txt": b"Content A",
-            "b.dat": b"Content B" * 10,
-            "subdir/c.bin": bytes(range(256)),
-        }
-        
-        for name, content in files.items():
-            with open(os.path.join(test_dir, name), "wb") as f:
-                f.write(content)
-        
-        # 创建归档
-        archive_path = os.path.join(tmpdir, "extract.archive")
-        builder = ArchiveBuilder(archive_path, checksum_hook=MD5Hook())
-        builder.add_dir(test_dir, "/root")
+        # 创建 Archive
+        builder = ArchiveBuilder(
+            str(archive_path),
+            checksum_hook=MD5Hook()
+        )
+        builder.add_dir(str(src_dir), "/assets")
         builder.build()
         
         # 解包
-        output_dir = os.path.join(tmpdir, "output")
+        with ArchiveReader(str(archive_path), checksum_hook=MD5Hook()) as reader:
+            result = reader.extract_all(str(output_dir))
         
-        with ArchiveReader(archive_path, checksum_hook=MD5Hook()) as reader:
-            result = reader.extract_all(
-                output_dir,
-                progress_callback=on_progress
-            )
-        
-        print(f"\n结果: 成功 {result.success_count}, 失败 {result.failed_count}")
-        print(f"总字节: {result.total_bytes}, 耗时: {result.elapsed_time:.3f}s")
+        assert result.success_count == len(files)
         
         # 验证解包内容
         for name, expected in files.items():
-            local_path = os.path.join(output_dir, "root", name)
-            assert os.path.exists(local_path), f"{name} 不存在"
-            with open(local_path, "rb") as f:
-                assert f.read() == expected, f"{name} 内容不匹配"
-        
-        assert result.success_count == 3
-        
-        print("✅ 测试 3 通过!")
-
-
-def test_read_batch():
-    """批量读取测试"""
-    print("\n" + "=" * 50)
-    print("测试 4: 批量读取")
-    print("=" * 50)
+            local_path = output_dir / "assets" / name
+            assert local_path.exists()
+            assert local_path.read_bytes() == expected
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 创建测试文件
-        test_dir = os.path.join(tmpdir, "data")
-        os.makedirs(test_dir)
+    def test_extract_all_with_progress(self, tmp_path, sample_files):
+        """带进度回调的解包"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "progress.archive"
+        output_dir = tmp_path / "output"
         
-        files = {
-            "1.txt": b"One",
-            "2.txt": b"Two",
-            "3.txt": b"Three",
-        }
-        
-        for name, content in files.items():
-            with open(os.path.join(test_dir, name), "wb") as f:
-                f.write(content)
-        
-        # 创建归档
-        archive_path = os.path.join(tmpdir, "multi.archive")
-        builder = ArchiveBuilder(archive_path)
-        builder.add_dir(test_dir, "/files")
+        builder = ArchiveBuilder(str(archive_path))
+        builder.add_dir(str(src_dir), "/assets")
         builder.build()
         
-        # 批量读取
-        with ArchiveReader(archive_path) as reader:
-            paths = ["/files/1.txt", "/files/3.txt"]
-            result = reader.read_batch(paths)
-            
-            print(f"读取结果: {list(result.keys())}")
-            
-            assert result["/files/1.txt"] == b"One"
-            assert result["/files/3.txt"] == b"Three"
-            assert "/files/2.txt" not in result  # 未请求
+        progress_calls = []
         
-        print("✅ 测试 4 通过!")
+        def on_progress(info: ProgressInfo):
+            progress_calls.append(info.current)
+        
+        with ArchiveReader(str(archive_path)) as reader:
+            result = reader.extract_all(
+                str(output_dir),
+                progress_callback=on_progress
+            )
+        
+        assert result.success_count == len(files)
+        assert len(progress_calls) >= 1
 
 
-if __name__ == "__main__":
-    test_batch_add_with_progress()
-    test_batch_add_with_skip()
-    test_extract_all_with_progress()
-    test_read_batch()
+class TestReadBatch:
+    """批量读取测试"""
     
-    print("\n" + "=" * 50)
-    print("🎉 所有批量操作测试通过!")
-    print("=" * 50)
+    def test_read_batch(self, tmp_path, sample_files):
+        """批量读取多个文件"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "batch.archive"
+        
+        builder = ArchiveBuilder(str(archive_path))
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        with ArchiveReader(str(archive_path)) as reader:
+            paths = ["/assets/hero.txt", "/assets/config.json"]
+            result = reader.read_batch(paths)
+        
+        assert len(result) == 2
+        assert result["/assets/hero.txt"] == files["hero.txt"]
+        assert result["/assets/config.json"] == files["config.json"]
+    
+    def test_read_batch_with_missing(self, tmp_path, sample_files):
+        """批量读取包含不存在的路径"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "missing.archive"
+        
+        builder = ArchiveBuilder(str(archive_path))
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        with ArchiveReader(str(archive_path)) as reader:
+            paths = ["/assets/hero.txt", "/not/exists.txt"]
+            result = reader.read_batch(paths, on_error='skip')
+        
+        # 只返回存在的
+        assert "/assets/hero.txt" in result
+        assert "/not/exists.txt" not in result

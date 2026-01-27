@@ -53,3 +53,23 @@ name = "testpypi"
 url = "https://test.pypi.org/simple/"
 publish-url = "https://test.pypi.org/legacy/"
 explicit = true
+
+[dependency-groups]
+dev = [
+    "pdoc>=13.1.1",
+    "pytest>=7.4.4",
+    "pytest-cov>=4.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "rclone: 需要 rclone 环境的测试",
+    "slow: 耗时较长的测试",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

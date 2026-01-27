@@ -2,19 +2,27 @@
 # -*- coding: utf-8 -*-
 """
 格式转换测试
+
+测试 Manifest/Archive/JSON 之间的互转功能。
 """
 
-import os
-import tempfile
+import json
+import zlib
+
+import pytest
+
 from grimoire import (
     ManifestBuilder, ManifestReader,
     ArchiveBuilder, ArchiveReader,
     ManifestJsonConverter, ModeConverter,
-    MD5Hook, ZlibCompressHook
+    MD5Hook,
 )
+from grimoire.hooks.checksum import SHA256Hook, CRC32Hook
+from grimoire.hooks.crypto import ZlibCompressHook, XorObfuscateHook
 from grimoire.hooks.base import CompressionHook
-import zlib
 
+
+# ==================== 测试用压缩 Hook ====================
 
 class ZlibHook(CompressionHook):
     @property
@@ -28,194 +36,404 @@ class ZlibHook(CompressionHook):
         return zlib.decompress(data)
 
 
-def test_manifest_to_json():
-    """测试 Manifest 转 JSON"""
-    print("=" * 50)
-    print("测试 1: Manifest 转 JSON")
-    print("=" * 50)
+# ==================== Manifest ↔ JSON 转换测试 ====================
+
+class TestManifestToJson:
+    """Manifest 转 JSON 测试"""
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 创建测试文件
-        test_dir = os.path.join(tmpdir, "assets")
-        os.makedirs(test_dir)
-        for i in range(3):
-            with open(os.path.join(test_dir, f"file_{i}.txt"), "wb") as f:
-                f.write(f"Content {i}".encode())
+    def test_basic_conversion(self, tmp_path, sample_files):
+        """基础转换"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "test.manifest"
+        json_path = tmp_path / "test.json"
         
         # 创建 Manifest
-        manifest_path = os.path.join(tmpdir, "test.manifest")
-        builder = ManifestBuilder(manifest_path, checksum_hook=MD5Hook())
-        builder.add_dir(test_dir, "/assets")
+        builder = ManifestBuilder(str(manifest_path), checksum_hook=MD5Hook())
+        builder.add_dir(str(src_dir), "/assets")
         builder.build()
         
-        # 转换为 JSON (自动检测 Hook)
-        json_path = os.path.join(tmpdir, "test.json")
-        ManifestJsonConverter.manifest_to_json(manifest_path, json_path)
+        # 转换为 JSON
+        ManifestJsonConverter.manifest_to_json(str(manifest_path), str(json_path))
         
-        # 读取验证
+        # 验证 JSON 内容
+        assert json_path.exists()
         with open(json_path, 'r', encoding='utf-8') as f:
-            import json
             data = json.load(f)
-            print(f"版本: {data['version']}")
-            print(f"校验算法ID: {data['checksum_algo']}")
-            print(f"索引标志: {data['index_flags']}")
-            print(f"条目数: {data['entry_count']}")
-            for entry in data['entries']:
-                print(f"  {entry['path']} ({entry['size']} bytes)")
         
-    print("✅ 测试 1 通过!")
-
-
-def test_json_to_manifest():
-    """测试 JSON 转 Manifest"""
-    print("\n" + "=" * 50)
-    print("测试 2: JSON 转 Manifest")
-    print("=" * 50)
+        assert data["version"] == 2
+        assert data["checksum_algo"] == 2  # MD5
+        assert data["entry_count"] == len(files)
+        assert len(data["entries"]) == len(files)
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 创建测试文件
-        test_dir = os.path.join(tmpdir, "assets")
-        os.makedirs(test_dir)
-        for i in range(3):
-            with open(os.path.join(test_dir, f"file_{i}.txt"), "wb") as f:
-                f.write(f"Content {i}".encode())
+    def test_json_contains_hook_names(self, tmp_path, sample_files):
+        """JSON 应包含 Hook 名称"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "named.manifest"
+        json_path = tmp_path / "named.json"
         
-        # 创建 JSON
-        import json
-        json_path = os.path.join(tmpdir, "test.json")
+        builder = ManifestBuilder(
+            str(manifest_path),
+            checksum_hook=MD5Hook(),
+            index_crypto=ZlibCompressHook()
+        )
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        ManifestJsonConverter.manifest_to_json(str(manifest_path), str(json_path))
+        
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        assert data["checksum_algo_name"] == "md5"
+        assert data["index_flags_name"] == "zlib"
+    
+    @pytest.mark.parametrize("checksum_hook,expected_algo_id", [
+        (MD5Hook(), 2),
+        (SHA256Hook(), 4),
+        (CRC32Hook(), 1),
+    ])
+    def test_different_checksum_algorithms(
+        self, checksum_hook, expected_algo_id, tmp_path, sample_files
+    ):
+        """测试不同校验算法的转换"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "algo.manifest"
+        json_path = tmp_path / "algo.json"
+        
+        builder = ManifestBuilder(str(manifest_path), checksum_hook=checksum_hook)
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        ManifestJsonConverter.manifest_to_json(str(manifest_path), str(json_path))
+        
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        assert data["checksum_algo"] == expected_algo_id
+
+
+class TestJsonToManifest:
+    """JSON 转 Manifest 测试"""
+    
+    def test_basic_conversion(self, tmp_path, sample_files):
+        """基础转换"""
+        src_dir, files = sample_files
+        json_path = tmp_path / "input.json"
+        manifest_path = tmp_path / "output.manifest"
+        
+        # 创建 JSON (路径格式与 normalize_path 输出一致，无前导斜杠)
+        entries = [{"path": f"assets/{name}"} for name in files.keys()]
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump({
-                "version": 1,
-                "checksum_hook": "md5",
-                "index_crypto": "zlib",
-                "entries": [
-                    {"path": "/assets/file_0.txt"},
-                    {"path": "/assets/file_1.txt"},
-                    {"path": "/assets/file_2.txt"},
-                ]
+                "version": 2,
+                "checksum_algo": 2,
+                "index_flags": 0,
+                "entries": entries
             }, f)
         
-        # 转换为 Manifest
-        manifest_path = os.path.join(tmpdir, "test.manifest")
+        # 转换并验证
         result = ManifestJsonConverter.json_to_manifest(
-            json_path, manifest_path,
-            local_base_path=tmpdir
+            str(json_path),
+            str(manifest_path),
+            local_base_path=str(src_dir),
+            path_mappings={"assets": str(src_dir)}
         )
         
-        print(f"成功: {result.success_count}, 失败: {result.failed_count}")
+        assert result.success_count == len(files)
+        assert result.failed_count == 0
         
-        # 验证
-        with ManifestReader(manifest_path, checksum_hook=MD5Hook(), index_crypto=ZlibCompressHook()) as reader:
-            print(f"条目数: {reader.entry_count}")
-            for path in reader.list_all():
-                print(f"  {path}")
-        
-    print("✅ 测试 2 通过!")
-
-
-def test_archive_to_manifest():
-    """测试 Archive 转 Manifest"""
-    print("\n" + "=" * 50)
-    print("测试 3: Archive 转 Manifest")
-    print("=" * 50)
+        # 读取验证
+        with ManifestReader(str(manifest_path), checksum_hook=MD5Hook()) as reader:
+            assert reader.entry_count == len(files)
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 创建测试文件
-        test_dir = os.path.join(tmpdir, "data")
-        os.makedirs(test_dir)
-        files = {
-            "a.txt": b"Content A",
-            "b.txt": b"Content B",
-        }
-        for name, content in files.items():
-            with open(os.path.join(test_dir, name), "wb") as f:
-                f.write(content)
+    def test_with_path_mappings(self, tmp_path, sample_files):
+        """路径映射测试"""
+        src_dir, files = sample_files
+        json_path = tmp_path / "mapped.json"
+        manifest_path = tmp_path / "mapped.manifest"
+        
+        entries = [{"path": f"/virtual/{name}"} for name in files.keys()]
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "version": 2,
+                "entries": entries
+            }, f)
+        
+        result = ManifestJsonConverter.json_to_manifest(
+            str(json_path),
+            str(manifest_path),
+            local_base_path=str(tmp_path),
+            path_mappings={"/virtual": str(src_dir)}
+        )
+        
+        assert result.success_count == len(files)
+
+
+class TestManifestJsonRoundtrip:
+    """Manifest ↔ JSON 往返测试"""
+    
+    def test_roundtrip_preserves_data(self, tmp_path, sample_files):
+        """往返转换应保持数据一致"""
+        src_dir, files = sample_files
+        
+        manifest1_path = tmp_path / "original.manifest"
+        json_path = tmp_path / "intermediate.json"
+        manifest2_path = tmp_path / "restored.manifest"
+        
+        # 创建原始 Manifest
+        builder = ManifestBuilder(str(manifest1_path), checksum_hook=MD5Hook())
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        # 转换为 JSON
+        ManifestJsonConverter.manifest_to_json(str(manifest1_path), str(json_path))
+        
+        # 转换回 Manifest
+        ManifestJsonConverter.json_to_manifest(
+            str(json_path),
+            str(manifest2_path),
+            local_base_path=str(tmp_path),
+            path_mappings={"assets": str(src_dir)}
+        )
+        
+        # 比较
+        with ManifestReader(str(manifest1_path), checksum_hook=MD5Hook()) as reader1:
+            with ManifestReader(str(manifest2_path), checksum_hook=MD5Hook()) as reader2:
+                assert reader1.entry_count == reader2.entry_count
+                
+                paths1 = sorted(reader1.list_all())
+                paths2 = sorted(reader2.list_all())
+                assert paths1 == paths2
+
+
+# ==================== Archive ↔ Manifest 转换测试 ====================
+
+class TestArchiveToManifest:
+    """Archive 转 Manifest 测试"""
+    
+    def test_basic_conversion(self, tmp_path, sample_files):
+        """基础转换"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "source.archive"
+        manifest_path = tmp_path / "output.manifest"
         
         # 创建 Archive
-        archive_path = os.path.join(tmpdir, "test.pak")
         builder = ArchiveBuilder(
-            archive_path,
+            str(archive_path),
             compression_hooks=[ZlibHook()],
             checksum_hook=MD5Hook()
         )
-        builder.add_dir(test_dir, "/data", algo_id=1)
+        builder.add_dir(str(src_dir), "/assets", algo_id=1)
         builder.build()
         
-        # 转换为 Manifest (不加密)
-        manifest_path = os.path.join(tmpdir, "test.manifest")
+        # 转换为 Manifest
         result = ModeConverter.archive_to_manifest(
-            archive_path, manifest_path,
+            str(archive_path),
+            str(manifest_path),
             compression_hooks=[ZlibHook()],
-            checksum_hook=MD5Hook(),
-            output_index_crypto=None  # 不加密
+            checksum_hook=MD5Hook()
         )
         
-        print(f"成功: {result.success_count}, 失败: {result.failed_count}")
+        assert result.success_count == len(files)
         
-        # 验证
-        with ManifestReader(manifest_path, checksum_hook=MD5Hook()) as reader:
-            print(f"条目数: {reader.entry_count}")
-            for path in reader.list_all():
-                entry = reader.get_entry(path)
-                print(f"  {path} ({entry.raw_size} bytes)")
-        
-    print("✅ 测试 3 通过!")
+        # 验证 Manifest
+        with ManifestReader(str(manifest_path), checksum_hook=MD5Hook()) as reader:
+            assert reader.entry_count == len(files)
+            for name, content in files.items():
+                entry = reader.get_entry(f"/assets/{name}")
+                assert entry.raw_size == len(content)
 
 
-def test_manifest_to_archive():
-    """测试 Manifest 转 Archive"""
-    print("\n" + "=" * 50)
-    print("测试 4: Manifest 转 Archive")
-    print("=" * 50)
+class TestManifestToArchive:
+    """Manifest 转 Archive 测试"""
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 创建测试文件
-        test_dir = os.path.join(tmpdir, "source")
-        os.makedirs(test_dir)
-        files = {
-            "x.txt": b"X content",
-            "y.txt": b"Y content",
-        }
-        for name, content in files.items():
-            with open(os.path.join(test_dir, name), "wb") as f:
-                f.write(content)
+    def test_basic_conversion(self, tmp_path, sample_files):
+        """基础转换"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "source.manifest"
+        archive_path = tmp_path / "output.archive"
         
         # 创建 Manifest
-        manifest_path = os.path.join(tmpdir, "test.manifest")
-        builder = ManifestBuilder(manifest_path, checksum_hook=MD5Hook())
-        builder.add_dir(test_dir, "/files")
+        builder = ManifestBuilder(str(manifest_path), checksum_hook=MD5Hook())
+        builder.add_dir(str(src_dir), "/assets")
         builder.build()
         
         # 转换为 Archive
-        archive_path = os.path.join(tmpdir, "test.pak")
         result = ModeConverter.manifest_to_archive(
-            manifest_path, archive_path,
-            local_base_path=tmpdir,
-            path_mappings={"/files": test_dir},  # 虚拟路径映射
+            str(manifest_path),
+            str(archive_path),
+            local_base_path=str(tmp_path),
+            path_mappings={"assets": str(src_dir)},
             checksum_hook_read=MD5Hook(),
             compression_hooks=[ZlibHook()],
             default_algo_id=1,
             output_checksum_hook=MD5Hook()
         )
         
-        print(f"成功: {result.success_count}, 失败: {result.failed_count}")
+        assert result.success_count == len(files)
         
-        # 验证
-        with ArchiveReader(archive_path, compression_hooks=[ZlibHook()], checksum_hook=MD5Hook()) as reader:
-            print(f"条目数: {reader.entry_count}")
-            for path in reader.list_all():
-                data = reader.read(path)
-                print(f"  {path} ({len(data)} bytes): {data[:20]}")
-        
-    print("✅ 测试 4 通过!")
+        # 验证 Archive
+        with ArchiveReader(
+            str(archive_path),
+            compression_hooks=[ZlibHook()],
+            checksum_hook=MD5Hook()
+        ) as reader:
+            assert reader.entry_count == len(files)
+            for name, expected in files.items():
+                data = reader.read(f"/assets/{name}")
+                assert data == expected
 
 
-if __name__ == "__main__":
-    test_manifest_to_json()
-    test_json_to_manifest()
-    test_archive_to_manifest()
-    test_manifest_to_archive()
+# ==================== 三方互转测试 ====================
+
+class TestFullConversionChain:
+    """完整转换链测试"""
     
-    print("\n" + "=" * 50)
-    print("🎉 所有转换测试通过!")
-    print("=" * 50)
+    def test_archive_to_manifest_to_json(self, tmp_path, sample_files):
+        """Archive → Manifest → JSON"""
+        src_dir, files = sample_files
+        
+        archive_path = tmp_path / "step1.archive"
+        manifest_path = tmp_path / "step2.manifest"
+        json_path = tmp_path / "step3.json"
+        
+        # Step 1: 创建 Archive
+        builder = ArchiveBuilder(
+            str(archive_path),
+            compression_hooks=[ZlibHook()],
+            checksum_hook=MD5Hook()
+        )
+        builder.add_dir(str(src_dir), "/data", algo_id=1)
+        builder.build()
+        
+        # Step 2: Archive → Manifest
+        ModeConverter.archive_to_manifest(
+            str(archive_path),
+            str(manifest_path),
+            compression_hooks=[ZlibHook()],
+            checksum_hook=MD5Hook()
+        )
+        
+        # Step 3: Manifest → JSON
+        ManifestJsonConverter.manifest_to_json(str(manifest_path), str(json_path))
+        
+        # 验证最终 JSON
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        assert data["entry_count"] == len(files)
+    
+    def test_json_to_manifest_to_archive(self, tmp_path, sample_files):
+        """JSON → Manifest → Archive"""
+        src_dir, files = sample_files
+        
+        json_path = tmp_path / "step1.json"
+        manifest_path = tmp_path / "step2.manifest"
+        archive_path = tmp_path / "step3.archive"
+        
+        # Step 1: 创建 JSON (路径格式无前导斜杠)
+        entries = [{"path": f"files/{name}"} for name in files.keys()]
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "version": 2,
+                "checksum_algo": 2,
+                "entries": entries
+            }, f)
+        
+        # Step 2: JSON → Manifest
+        ManifestJsonConverter.json_to_manifest(
+            str(json_path),
+            str(manifest_path),
+            local_base_path=str(tmp_path),
+            path_mappings={"files": str(src_dir)}
+        )
+        
+        # Step 3: Manifest → Archive
+        ModeConverter.manifest_to_archive(
+            str(manifest_path),
+            str(archive_path),
+            local_base_path=str(tmp_path),
+            path_mappings={"files": str(src_dir)},
+            checksum_hook_read=MD5Hook(),
+            compression_hooks=[ZlibHook()],
+            default_algo_id=1
+        )
+        
+        # 验证最终 Archive
+        with ArchiveReader(
+            str(archive_path),
+            compression_hooks=[ZlibHook()]
+        ) as reader:
+            assert reader.entry_count == len(files)
+            for name, expected in files.items():
+                data = reader.read(f"/files/{name}")
+                assert data == expected
+    
+    def test_full_roundtrip(self, tmp_path, sample_files):
+        """完整往返: Archive → Manifest → JSON → Manifest → Archive"""
+        src_dir, files = sample_files
+        
+        # 路径设置
+        archive1_path = tmp_path / "original.archive"
+        manifest1_path = tmp_path / "step1.manifest"
+        json_path = tmp_path / "step2.json"
+        manifest2_path = tmp_path / "step3.manifest"
+        archive2_path = tmp_path / "final.archive"
+        
+        # 原始 Archive
+        builder = ArchiveBuilder(
+            str(archive1_path),
+            compression_hooks=[ZlibHook()],
+            checksum_hook=MD5Hook()
+        )
+        builder.add_dir(str(src_dir), "/data", algo_id=1)
+        builder.build()
+        
+        # Archive → Manifest
+        ModeConverter.archive_to_manifest(
+            str(archive1_path),
+            str(manifest1_path),
+            compression_hooks=[ZlibHook()],
+            checksum_hook=MD5Hook()
+        )
+        
+        # Manifest → JSON
+        ManifestJsonConverter.manifest_to_json(str(manifest1_path), str(json_path))
+        
+        # JSON → Manifest
+        ManifestJsonConverter.json_to_manifest(
+            str(json_path),
+            str(manifest2_path),
+            local_base_path=str(tmp_path),
+            path_mappings={"data": str(src_dir)}
+        )
+        
+        # Manifest → Archive
+        ModeConverter.manifest_to_archive(
+            str(manifest2_path),
+            str(archive2_path),
+            local_base_path=str(tmp_path),
+            path_mappings={"data": str(src_dir)},
+            checksum_hook_read=MD5Hook(),
+            compression_hooks=[ZlibHook()],
+            default_algo_id=1,
+            output_checksum_hook=MD5Hook()
+        )
+        
+        # 比较原始和最终 Archive 的内容
+        with ArchiveReader(
+            str(archive1_path),
+            compression_hooks=[ZlibHook()],
+            checksum_hook=MD5Hook()
+        ) as reader1:
+            with ArchiveReader(
+                str(archive2_path),
+                compression_hooks=[ZlibHook()],
+                checksum_hook=MD5Hook()
+            ) as reader2:
+                assert reader1.entry_count == reader2.entry_count
+                
+                for name, expected in files.items():
+                    data1 = reader1.read(f"/data/{name}")
+                    data2 = reader2.read(f"/data/{name}")
+                    assert data1 == data2 == expected

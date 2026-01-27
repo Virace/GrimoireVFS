@@ -1,18 +1,38 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-GrimoireVFS Archive 端到端测试
+Archive 模块测试
+
+测试 ArchiveBuilder 和 ArchiveReader 的功能。
 """
 
+import io
 import os
-import tempfile
 import zlib
+
+import pytest
+
 from grimoire import ArchiveBuilder, ArchiveReader, MD5Hook
+from grimoire.hooks.checksum import (
+    NoneChecksumHook,
+    CRC32Hook,
+    SHA1Hook,
+    SHA256Hook,
+)
+from grimoire.hooks.crypto import (
+    ZlibCompressHook,
+    XorObfuscateHook,
+    ZlibXorHook,
+)
 from grimoire.hooks.base import CompressionHook
+from grimoire.exceptions import CorruptedDataError, UnknownAlgorithmError
 
 
-# 简单的 zlib 压缩 Hook (测试用)
+# ==================== 测试用压缩 Hook ====================
+
 class ZlibHook(CompressionHook):
+    """Zlib 压缩 Hook (测试用)"""
+    
     @property
     def algo_id(self) -> int:
         return 1
@@ -24,177 +44,475 @@ class ZlibHook(CompressionHook):
         return zlib.decompress(data)
 
 
-def test_archive_basic():
-    """基础功能测试"""
-    print("=" * 50)
-    print("测试 1: 基础 Archive 创建和读取")
-    print("=" * 50)
+class LZ4MockHook(CompressionHook):
+    """模拟 LZ4 压缩 Hook (实际使用 zlib，仅测试多算法)"""
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 创建测试文件
-        test_dir = os.path.join(tmpdir, "assets")
-        os.makedirs(test_dir)
+    @property
+    def algo_id(self) -> int:
+        return 2
+    
+    def compress(self, data: bytes) -> bytes:
+        return zlib.compress(data, level=1)
+    
+    def decompress(self, data: bytes, raw_size: int) -> bytes:
+        return zlib.decompress(data)
+
+
+# ==================== ArchiveBuilder 测试 ====================
+
+class TestArchiveBuilderBasic:
+    """ArchiveBuilder 基础功能测试"""
+    
+    def test_create_empty_archive(self, tmp_path):
+        """创建空 Archive"""
+        archive_path = tmp_path / "empty.archive"
         
-        files = {
-            "hero.txt": b"Hero data content" * 100,  # 重复内容，便于测试压缩
-            "config.json": b'{"name": "test", "value": 12345}' * 50,
-            "binary.dat": bytes(range(256)) * 10,
-        }
+        builder = ArchiveBuilder(str(archive_path))
+        builder.build()
         
-        for name, content in files.items():
-            path = os.path.join(test_dir, name)
-            with open(path, "wb") as f:
-                f.write(content)
+        assert archive_path.exists()
+        assert archive_path.stat().st_size > 0
+    
+    def test_add_single_file_no_compression(self, tmp_path, sample_files):
+        """添加单个文件 (无压缩)"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "single.archive"
         
-        # 创建 Archive (带压缩)
-        archive_path = os.path.join(tmpdir, "test.archive")
-        zlib_hook = ZlibHook()
+        builder = ArchiveBuilder(str(archive_path))
+        builder.add_file(str(src_dir / "hero.txt"), "/assets/hero.txt", algo_id=0)
+        builder.build()
+        
+        assert builder.entry_count == 1
+    
+    def test_add_single_file_with_compression(self, tmp_path, large_files):
+        """添加单个文件 (带压缩)"""
+        src_dir, files = large_files
+        archive_path = tmp_path / "compressed.archive"
         
         builder = ArchiveBuilder(
-            archive_path,
-            compression_hooks=[zlib_hook],
-            checksum_hook=MD5Hook()
+            str(archive_path),
+            compression_hooks=[ZlibHook()]
         )
-        count = builder.add_dir(test_dir, "/game/assets", algo_id=1)  # 使用压缩
-        print(f"添加文件数: {count}")
-        print(f"压缩统计: {builder.compression_stats}")
+        builder.add_file(str(src_dir / "repeated.txt"), "/data/repeated.txt", algo_id=1)
         builder.build()
         
-        # 检查文件大小
-        archive_size = os.path.getsize(archive_path)
-        original_size = sum(len(c) for c in files.values())
-        print(f"原始大小: {original_size} bytes")
-        print(f"归档大小: {archive_size} bytes")
-        print(f"压缩率: {archive_size / original_size:.2%}")
+        # 压缩后大小应显著减小
+        stats = builder.compression_stats
+        assert stats["total_raw"] > stats["total_packed"]
+    
+    def test_add_directory(self, tmp_path, sample_files):
+        """添加整个目录"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "dir.archive"
         
-        # 读取 Archive
+        builder = ArchiveBuilder(str(archive_path))
+        count = builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        assert count == len(files)
+        assert builder.entry_count == len(files)
+
+
+class TestArchiveBuilderCompression:
+    """ArchiveBuilder 压缩测试"""
+    
+    @pytest.fixture
+    def compression_hooks(self):
+        return [ZlibHook(), LZ4MockHook()]
+    
+    def test_multiple_compression_hooks(self, tmp_path, large_files, compression_hooks):
+        """注册多个压缩 Hook"""
+        src_dir, files = large_files
+        archive_path = tmp_path / "multi_algo.archive"
+        
+        builder = ArchiveBuilder(
+            str(archive_path),
+            compression_hooks=compression_hooks
+        )
+        
+        # 使用不同算法添加文件
+        builder.add_file(str(src_dir / "repeated.txt"), "/zlib/file.txt", algo_id=1)
+        builder.add_file(str(src_dir / "binary.dat"), "/lz4/file.dat", algo_id=2)
+        builder.build()
+        
+        assert builder.entry_count == 2
+    
+    def test_compression_stats(self, tmp_path, large_files):
+        """压缩统计信息"""
+        src_dir, files = large_files
+        archive_path = tmp_path / "stats.archive"
+        
+        builder = ArchiveBuilder(
+            str(archive_path),
+            compression_hooks=[ZlibHook()]
+        )
+        builder.add_dir(str(src_dir), "/data", algo_id=1)
+        builder.build()
+        
+        stats = builder.compression_stats
+        assert "total_raw" in stats
+        assert "total_packed" in stats
+        assert "ratio" in stats
+
+
+class TestArchiveBuilderChecksum:
+    """ArchiveBuilder 校验测试"""
+    
+    @pytest.mark.parametrize("checksum_hook", [
+        None, NoneChecksumHook(), CRC32Hook(), MD5Hook(), SHA256Hook()
+    ])
+    def test_different_checksum_hooks(self, checksum_hook, tmp_path, sample_files):
+        """测试不同校验算法"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "checksum.archive"
+        
+        builder = ArchiveBuilder(
+            str(archive_path),
+            checksum_hook=checksum_hook
+        )
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        # 使用相同 Hook 读取验证
+        with ArchiveReader(str(archive_path), checksum_hook=checksum_hook) as reader:
+            for name in files:
+                vfs_path = f"/assets/{name}"
+                data = reader.read(vfs_path, verify=True)
+                assert data == files[name]
+
+
+class TestArchiveBuilderBatch:
+    """ArchiveBuilder 批量操作测试"""
+    
+    def test_add_files_batch(self, tmp_path, sample_files):
+        """批量添加文件"""
+        from grimoire.core.batch import FileItem
+        
+        src_dir, files = sample_files
+        archive_path = tmp_path / "batch.archive"
+        
+        items = [
+            FileItem(str(src_dir / name), f"/batch/{name}", algo_id=0)
+            for name in files.keys()
+        ]
+        
+        builder = ArchiveBuilder(str(archive_path))
+        result = builder.add_files_batch(items)
+        builder.build()
+        
+        assert result.success_count == len(files)
+        assert result.failed_count == 0
+    
+    def test_add_files_batch_skip_missing(self, tmp_path, sample_files):
+        """批量添加时跳过不存在的文件"""
+        from grimoire.core.batch import FileItem
+        
+        src_dir, files = sample_files
+        archive_path = tmp_path / "skip.archive"
+        
+        items = [
+            FileItem(str(src_dir / "hero.txt"), "/exists.txt"),
+            FileItem(str(src_dir / "NOT_EXISTS.txt"), "/missing.txt"),  # 不存在
+        ]
+        
+        builder = ArchiveBuilder(str(archive_path))
+        result = builder.add_files_batch(items, on_error='skip')
+        builder.build()
+        
+        assert result.success_count == 1
+        assert result.failed_count == 1
+    
+    def test_add_dir_batch_with_progress(self, tmp_path, sample_files):
+        """带进度回调的批量添加"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "progress.archive"
+        
+        progress_calls = []
+        
+        def on_progress(info):
+            progress_calls.append({
+                'current': info.current,
+                'total': info.total,
+            })
+        
+        builder = ArchiveBuilder(
+            str(archive_path),
+            compression_hooks=[ZlibHook()]
+        )
+        result = builder.add_dir_batch(
+            str(src_dir), "/assets",
+            algo_id=1,
+            progress_callback=on_progress
+        )
+        builder.build()
+        
+        assert result.success_count == len(files)
+        assert len(progress_calls) >= 1
+
+
+# ==================== ArchiveReader 测试 ====================
+
+class TestArchiveReaderBasic:
+    """ArchiveReader 基础功能测试"""
+    
+    def test_read_archive(self, archive_file):
+        """读取 Archive"""
+        archive_path, src_dir, files = archive_file
+        
+        with ArchiveReader(str(archive_path), compression_hooks=[ZlibHook()]) as reader:
+            assert reader.entry_count == len(files)
+    
+    def test_exists(self, archive_file):
+        """检查路径存在性"""
+        archive_path, src_dir, files = archive_file
+        
+        with ArchiveReader(str(archive_path), compression_hooks=[ZlibHook()]) as reader:
+            assert reader.exists("/assets/hero.txt") is True
+            assert reader.exists("/not/exist.txt") is False
+    
+    def test_read_content(self, archive_file):
+        """读取文件内容"""
+        archive_path, src_dir, files = archive_file
+        
         with ArchiveReader(
-            archive_path,
-            compression_hooks=[zlib_hook],
+            str(archive_path),
+            compression_hooks=[ZlibHook()],
             checksum_hook=MD5Hook()
         ) as reader:
-            print(f"使用 mmap: {reader.is_mmap}")
-            print(f"条目数量: {reader.entry_count}")
-            print(f"所有路径: {reader.list_all()}")
-            
-            # 读取并验证内容
             for name, expected in files.items():
-                vfs_path = f"/game/assets/{name}"
+                vfs_path = f"/assets/{name}"
                 data = reader.read(vfs_path)
-                assert data == expected, f"{name} 内容不匹配"
-            
-            print("所有文件内容验证通过!")
-        
-        print("✅ 测试 1 通过!")
+                assert data == expected
 
 
-def test_archive_no_compression():
-    """无压缩模式测试"""
-    print("\n" + "=" * 50)
-    print("测试 2: 无压缩模式")
-    print("=" * 50)
+class TestArchiveReaderModes:
+    """ArchiveReader 读取模式测试"""
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_file = os.path.join(tmpdir, "data.bin")
-        content = b"Test content without compression"
-        with open(test_file, "wb") as f:
-            f.write(content)
+    def test_mmap_mode(self, archive_file):
+        """mmap 模式"""
+        archive_path, src_dir, files = archive_file
         
-        archive_path = os.path.join(tmpdir, "nocomp.archive")
-        
-        builder = ArchiveBuilder(archive_path)
-        builder.add_file(test_file, "/data.bin", algo_id=0)  # 不压缩
-        builder.build()
-        
-        with ArchiveReader(archive_path) as reader:
-            data = reader.read("/data.bin")
-            assert data == content
+        with ArchiveReader(
+            str(archive_path),
+            compression_hooks=[ZlibHook()],
+            use_mmap=True
+        ) as reader:
+            assert reader.is_mmap is True
             
-            entry = reader.get_entry("/data.bin")
-            assert entry.packed_size == entry.raw_size  # 无压缩应相等
-        
-        print("✅ 测试 2 通过!")
-
-
-def test_archive_with_bytesio():
-    """BytesIO 接口测试"""
-    print("\n" + "=" * 50)
-    print("测试 3: BytesIO 接口")
-    print("=" * 50)
+            data = reader.read("/assets/hero.txt")
+            assert data == files["hero.txt"]
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_file = os.path.join(tmpdir, "text.txt")
-        content = "Hello, GrimoireVFS!\n这是中文内容。"
-        # 使用二进制模式写入，避免 Windows 换行符问题
-        with open(test_file, "wb") as f:
-            f.write(content.encode("utf-8"))
+    def test_traditional_mode(self, archive_file):
+        """传统文件模式"""
+        archive_path, src_dir, files = archive_file
         
-        archive_path = os.path.join(tmpdir, "text.archive")
-        
-        builder = ArchiveBuilder(archive_path)
-        builder.add_file(test_file, "/text.txt")
-        builder.build()
-        
-        with ArchiveReader(archive_path) as reader:
-            # 使用 open() 返回 BytesIO
-            file_obj = reader.open("/text.txt")
-            data = file_obj.read().decode("utf-8")
-            assert data == content
+        with ArchiveReader(
+            str(archive_path),
+            compression_hooks=[ZlibHook()],
+            use_mmap=False
+        ) as reader:
+            assert reader.is_mmap is False
             
-            # 可以 seek
+            data = reader.read("/assets/hero.txt")
+            assert data == files["hero.txt"]
+
+
+class TestArchiveReaderOpen:
+    """ArchiveReader.open 测试"""
+    
+    def test_open_returns_bytesio(self, archive_file):
+        """open 应返回 BytesIO"""
+        archive_path, src_dir, files = archive_file
+        
+        with ArchiveReader(
+            str(archive_path),
+            compression_hooks=[ZlibHook()]
+        ) as reader:
+            file_obj = reader.open("/assets/hero.txt")
+            
+            assert isinstance(file_obj, io.BytesIO)
+            assert file_obj.read() == files["hero.txt"]
+    
+    def test_open_seekable(self, archive_file):
+        """open 返回的对象应支持 seek"""
+        archive_path, src_dir, files = archive_file
+        
+        with ArchiveReader(
+            str(archive_path),
+            compression_hooks=[ZlibHook()]
+        ) as reader:
+            file_obj = reader.open("/assets/hero.txt")
+            
+            # 读取部分
+            first = file_obj.read(5)
+            
+            # seek 回起始
             file_obj.seek(0)
-            first_line = file_obj.readline().decode("utf-8")
-            assert first_line == "Hello, GrimoireVFS!\n"
-        
-        print("✅ 测试 3 通过!")
+            
+            # 重新读取应相同
+            assert file_obj.read(5) == first
 
 
-def test_archive_integrity():
-    """数据完整性测试"""
-    print("\n" + "=" * 50)
-    print("测试 4: 数据完整性校验")
-    print("=" * 50)
+class TestArchiveReaderVerify:
+    """ArchiveReader 校验测试"""
     
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_file = os.path.join(tmpdir, "important.dat")
-        content = b"Critical data that must not be corrupted"
-        with open(test_file, "wb") as f:
-            f.write(content)
+    def test_verify_success(self, tmp_path, sample_files):
+        """校验正确的数据"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "verify.archive"
         
-        archive_path = os.path.join(tmpdir, "integrity.archive")
-        
-        builder = ArchiveBuilder(archive_path, checksum_hook=MD5Hook())
-        builder.add_file(test_file, "/important.dat")
+        builder = ArchiveBuilder(
+            str(archive_path),
+            checksum_hook=MD5Hook()
+        )
+        builder.add_dir(str(src_dir), "/assets")
         builder.build()
         
-        # 正常读取应该成功
-        with ArchiveReader(archive_path, checksum_hook=MD5Hook()) as reader:
-            data = reader.read("/important.dat", verify=True)
-            assert data == content
-            print("正常读取: 校验通过")
-        
-        # 篡改数据后应该失败
-        with open(archive_path, "r+b") as f:
-            # 找到数据区并篡改
-            f.seek(-10, 2)  # 从末尾往前
-            f.write(b"CORRUPTED!")
-        
-        try:
-            with ArchiveReader(archive_path, checksum_hook=MD5Hook()) as reader:
-                reader.read("/important.dat", verify=True)
-            print("错误: 篡改后应该抛出异常")
-        except Exception as e:
-            print(f"篡改检测: 捕获异常 - {type(e).__name__}")
-        
-        print("✅ 测试 4 通过!")
-
-
-if __name__ == "__main__":
-    test_archive_basic()
-    test_archive_no_compression()
-    test_archive_with_bytesio()
-    test_archive_integrity()
+        with ArchiveReader(str(archive_path), checksum_hook=MD5Hook()) as reader:
+            for name in files:
+                data = reader.read(f"/assets/{name}", verify=True)
+                assert data == files[name]
     
-    print("\n" + "=" * 50)
-    print("🎉 所有 Archive 测试通过!")
-    print("=" * 50)
+    def test_verify_corrupted(self, tmp_path, sample_files):
+        """校验损坏的数据应抛出异常"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "corrupt.archive"
+        
+        builder = ArchiveBuilder(
+            str(archive_path),
+            checksum_hook=MD5Hook()
+        )
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        archive_size = archive_path.stat().st_size
+        
+        # 篡改数据区 (文件中间位置)
+        corrupt_pos = archive_size // 2
+        with open(archive_path, "r+b") as f:
+            f.seek(corrupt_pos)
+            f.write(b"CORRUPTED!DATA!")
+        
+        with ArchiveReader(str(archive_path), checksum_hook=MD5Hook()) as reader:
+            # 尝试读取所有文件，至少有一个应该校验失败
+            corruption_detected = False
+            for name in files:
+                try:
+                    reader.read(f"/assets/{name}", verify=True)
+                except CorruptedDataError:
+                    corruption_detected = True
+                    break
+                except Exception:
+                    # 其他异常也视为检测到损坏
+                    corruption_detected = True
+                    break
+            
+            assert corruption_detected, "应检测到数据损坏"
+
+
+class TestArchiveReaderBatch:
+    """ArchiveReader 批量读取测试"""
+    
+    def test_read_batch(self, archive_file):
+        """批量读取多个文件"""
+        archive_path, src_dir, files = archive_file
+        
+        with ArchiveReader(
+            str(archive_path),
+            compression_hooks=[ZlibHook()]
+        ) as reader:
+            paths = [f"/assets/{name}" for name in list(files.keys())[:2]]
+            result = reader.read_batch(paths)
+            
+            assert len(result) == 2
+            for path in paths:
+                assert path in result
+
+
+class TestArchiveNoCompression:
+    """无压缩模式测试"""
+    
+    def test_no_compression(self, tmp_path, sample_files):
+        """无压缩模式"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "nocomp.archive"
+        
+        builder = ArchiveBuilder(str(archive_path))
+        builder.add_dir(str(src_dir), "/assets", algo_id=0)
+        builder.build()
+        
+        with ArchiveReader(str(archive_path)) as reader:
+            entry = reader.get_entry("/assets/hero.txt")
+            
+            # 无压缩时 packed_size == raw_size
+            assert entry.packed_size == entry.raw_size
+            
+            data = reader.read("/assets/hero.txt")
+            assert data == files["hero.txt"]
+
+
+class TestArchiveIndexCrypto:
+    """Archive 索引加密测试"""
+    
+    @pytest.mark.parametrize("crypto_cls", [
+        ZlibCompressHook, XorObfuscateHook, ZlibXorHook
+    ])
+    def test_index_crypto(self, crypto_cls, tmp_path, sample_files):
+        """测试不同索引加密方式"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "crypto.archive"
+        crypto = crypto_cls()
+        
+        builder = ArchiveBuilder(
+            str(archive_path),
+            index_crypto=crypto
+        )
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        with ArchiveReader(str(archive_path), index_crypto=crypto) as reader:
+            assert reader.is_decrypted is True
+            assert reader.entry_count == len(files)
+
+
+class TestArchiveCombinations:
+    """Archive 功能组合测试"""
+    
+    @pytest.mark.parametrize("use_compression", [True, False])
+    @pytest.mark.parametrize("use_checksum", [True, False])
+    @pytest.mark.parametrize("use_crypto", [True, False])
+    def test_all_combinations(
+        self, use_compression, use_checksum, use_crypto,
+        tmp_path, sample_files
+    ):
+        """测试所有功能组合"""
+        src_dir, files = sample_files
+        archive_path = tmp_path / "combo.archive"
+        
+        compression_hooks = [ZlibHook()] if use_compression else None
+        checksum_hook = MD5Hook() if use_checksum else None
+        index_crypto = ZlibCompressHook() if use_crypto else None
+        
+        # 构建
+        builder = ArchiveBuilder(
+            str(archive_path),
+            compression_hooks=compression_hooks,
+            checksum_hook=checksum_hook,
+            index_crypto=index_crypto
+        )
+        algo_id = 1 if use_compression else 0
+        builder.add_dir(str(src_dir), "/assets", algo_id=algo_id)
+        builder.build()
+        
+        # 读取
+        with ArchiveReader(
+            str(archive_path),
+            compression_hooks=compression_hooks,
+            checksum_hook=checksum_hook,
+            index_crypto=index_crypto
+        ) as reader:
+            assert reader.entry_count == len(files)
+            
+            for name, expected in files.items():
+                data = reader.read(f"/assets/{name}", verify=use_checksum)
+                assert data == expected

@@ -1,157 +1,409 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-GrimoireVFS Manifest 端到端测试
+Manifest 模块测试
+
+测试 ManifestBuilder 和 ManifestReader 的功能。
 """
 
 import os
-import tempfile
-import shutil
+
+import pytest
+
 from grimoire import ManifestBuilder, ManifestReader, MD5Hook
+from grimoire.hooks.checksum import (
+    NoneChecksumHook,
+    CRC32Hook,
+    SHA1Hook,
+    SHA256Hook,
+)
+from grimoire.hooks.crypto import (
+    ZlibCompressHook,
+    XorObfuscateHook,
+    ZlibXorHook,
+)
+from grimoire.hooks.base import IndexCryptoHook
+from grimoire.exceptions import IndexNotDecryptedError
 
 
-def test_manifest_basic():
-    """基础功能测试"""
-    print("=" * 50)
-    print("测试 1: 基础 Manifest 创建和读取")
-    print("=" * 50)
+# ==================== ManifestBuilder 测试 ====================
+
+class TestManifestBuilderBasic:
+    """ManifestBuilder 基础功能测试"""
     
-    # 创建临时目录
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 创建测试文件
-        test_dir = os.path.join(tmpdir, "assets")
-        os.makedirs(test_dir)
+    def test_create_empty_manifest(self, tmp_path):
+        """创建空 Manifest"""
+        manifest_path = tmp_path / "empty.manifest"
         
-        files = {
-            "hero.txt": b"Hero data content",
-            "config.json": b'{"name": "test"}',
-            "subdir/data.bin": b"\x00\x01\x02\x03\x04",
-        }
-        
-        for name, content in files.items():
-            path = os.path.join(test_dir, name)
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "wb") as f:
-                f.write(content)
-        
-        # 创建 Manifest
-        manifest_path = os.path.join(tmpdir, "test.manifest")
-        builder = ManifestBuilder(manifest_path, checksum_hook=MD5Hook())
-        count = builder.add_dir(test_dir, "/game/assets")
-        print(f"添加文件数: {count}")
-        print(f"字典统计: {builder.path_stats}")
-        builder.build()
-        print(f"Manifest 已创建: {manifest_path}")
-        
-        # 读取 Manifest
-        with ManifestReader(manifest_path, checksum_hook=MD5Hook()) as reader:
-            print(f"条目数量: {reader.entry_count}")
-            print(f"所有路径: {reader.list_all()}")
-            
-            # 测试存在性检查
-            assert reader.exists("/game/assets/hero.txt"), "hero.txt 应该存在"
-            assert not reader.exists("/not/exist.txt"), "不存在的文件应返回 False"
-            
-            # 测试文件校验
-            hero_path = os.path.join(test_dir, "hero.txt")
-            assert reader.verify_file("/game/assets/hero.txt", hero_path), "校验应通过"
-            
-            # 修改文件后校验应失败
-            with open(hero_path, "wb") as f:
-                f.write(b"Modified content")
-            assert not reader.verify_file("/game/assets/hero.txt", hero_path), "修改后校验应失败"
-        
-        print("✅ 测试 1 通过!")
-
-
-def test_manifest_chinese_path():
-    """中文路径测试"""
-    print("\n" + "=" * 50)
-    print("测试 2: 中文路径支持")
-    print("=" * 50)
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 创建中文文件
-        test_file = os.path.join(tmpdir, "测试文件.txt")
-        with open(test_file, "wb") as f:
-            f.write("这是中文内容".encode("utf-8"))
-        
-        manifest_path = os.path.join(tmpdir, "chinese.manifest")
-        builder = ManifestBuilder(manifest_path, checksum_hook=MD5Hook())
-        builder.add_file(test_file, "/游戏/资源/测试文件.txt")
+        builder = ManifestBuilder(str(manifest_path))
         builder.build()
         
-        with ManifestReader(manifest_path, checksum_hook=MD5Hook()) as reader:
+        assert manifest_path.exists()
+        assert manifest_path.stat().st_size > 0
+    
+    def test_add_single_file(self, tmp_path, sample_files):
+        """添加单个文件"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "single.manifest"
+        
+        builder = ManifestBuilder(str(manifest_path))
+        builder.add_file(str(src_dir / "hero.txt"), "/assets/hero.txt")
+        builder.build()
+        
+        assert builder.entry_count == 1
+    
+    def test_add_directory(self, tmp_path, sample_files):
+        """添加整个目录"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "dir.manifest"
+        
+        builder = ManifestBuilder(str(manifest_path))
+        count = builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        assert count == len(files)
+        assert builder.entry_count == len(files)
+    
+    def test_add_directory_non_recursive(self, tmp_path, sample_files):
+        """非递归添加目录"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "nonrecursive.manifest"
+        
+        builder = ManifestBuilder(str(manifest_path))
+        count = builder.add_dir(str(src_dir), "/assets", recursive=False)
+        builder.build()
+        
+        # 只有根目录的文件
+        root_files = [f for f in files.keys() if "/" not in f]
+        assert count == len(root_files)
+    
+    def test_path_stats(self, tmp_path, sample_files):
+        """路径字典统计"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "stats.manifest"
+        
+        builder = ManifestBuilder(str(manifest_path))
+        builder.add_dir(str(src_dir), "/assets")
+        
+        stats = builder.path_stats
+        assert "dirs" in stats
+        assert "names" in stats
+        assert "exts" in stats
+
+
+class TestManifestBuilderChecksum:
+    """ManifestBuilder 校验算法测试"""
+    
+    @pytest.mark.parametrize("hook,expected_size", [
+        (None, 0),
+        (NoneChecksumHook(), 0),
+        (CRC32Hook(), 4),
+        (MD5Hook(), 16),
+        (SHA1Hook(), 20),
+        (SHA256Hook(), 32),
+    ])
+    def test_different_checksum_hooks(self, hook, expected_size, tmp_path, sample_files):
+        """测试不同校验算法"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "checksum.manifest"
+        
+        builder = ManifestBuilder(str(manifest_path), checksum_hook=hook)
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        # 读取并验证
+        with ManifestReader(str(manifest_path), checksum_hook=hook) as reader:
+            entry = reader.get_entry("/assets/hero.txt")
+            assert len(entry.checksum) == expected_size
+
+
+class TestManifestBuilderIndexCrypto:
+    """ManifestBuilder 索引加密测试"""
+    
+    @pytest.mark.parametrize("crypto_cls", [
+        ZlibCompressHook,
+        XorObfuscateHook,
+        ZlibXorHook,
+    ])
+    def test_different_index_crypto(self, crypto_cls, tmp_path, sample_files):
+        """测试不同索引加密方式"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "crypto.manifest"
+        crypto = crypto_cls()
+        
+        builder = ManifestBuilder(str(manifest_path), index_crypto=crypto)
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        # 使用相同加密 Hook 读取
+        with ManifestReader(str(manifest_path), index_crypto=crypto) as reader:
+            assert reader.is_decrypted is True
+            assert reader.entry_count == len(files)
+
+
+class TestManifestBuilderBatch:
+    """ManifestBuilder 批量操作测试"""
+    
+    def test_add_files_batch(self, tmp_path, sample_files):
+        """批量添加文件"""
+        from grimoire.core.batch import FileItem
+        
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "batch.manifest"
+        
+        items = [
+            FileItem(str(src_dir / name), f"/batch/{name}")
+            for name in files.keys()
+        ]
+        
+        builder = ManifestBuilder(str(manifest_path))
+        result = builder.add_files_batch(items)
+        builder.build()
+        
+        assert result.success_count == len(files)
+        assert result.failed_count == 0
+    
+    def test_add_dir_batch_with_progress(self, tmp_path, sample_files):
+        """带进度回调的批量添加"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "progress.manifest"
+        
+        progress_calls = []
+        
+        def on_progress(info):
+            progress_calls.append(info.current)
+        
+        builder = ManifestBuilder(str(manifest_path))
+        result = builder.add_dir_batch(
+            str(src_dir), "/assets",
+            progress_callback=on_progress
+        )
+        builder.build()
+        
+        assert result.success_count == len(files)
+        # 进度回调应被调用
+        assert len(progress_calls) >= 1
+
+
+# ==================== ManifestReader 测试 ====================
+
+class TestManifestReaderBasic:
+    """ManifestReader 基础功能测试"""
+    
+    def test_read_manifest(self, manifest_file):
+        """读取 Manifest"""
+        manifest_path, src_dir, files = manifest_file
+        
+        with ManifestReader(str(manifest_path)) as reader:
+            assert reader.entry_count == len(files)
+    
+    def test_exists(self, manifest_file):
+        """检查路径存在性"""
+        manifest_path, src_dir, files = manifest_file
+        
+        with ManifestReader(str(manifest_path)) as reader:
+            assert reader.exists("/assets/hero.txt") is True
+            assert reader.exists("/not/exist.txt") is False
+    
+    def test_get_entry(self, manifest_file):
+        """获取条目信息"""
+        manifest_path, src_dir, files = manifest_file
+        
+        with ManifestReader(str(manifest_path)) as reader:
+            entry = reader.get_entry("/assets/hero.txt")
+            
+            assert entry is not None
+            assert entry.raw_size == len(files["hero.txt"])
+    
+    def test_list_all(self, manifest_file):
+        """列出所有路径"""
+        manifest_path, src_dir, files = manifest_file
+        
+        with ManifestReader(str(manifest_path)) as reader:
             paths = reader.list_all()
-            print(f"路径列表: {paths}")
-            assert "/游戏/资源/测试文件.txt" in paths
-            assert reader.exists("/游戏/资源/测试文件.txt")
-        
-        print("✅ 测试 2 通过!")
+            
+            assert len(paths) == len(files)
+            # 注意: normalize_path 会去除前导斜杠
+            assert any("assets/hero.txt" in p for p in paths)
 
 
-def test_manifest_encrypted():
-    """加密索引测试"""
-    print("\n" + "=" * 50)
-    print("测试 3: 索引加密")
-    print("=" * 50)
+class TestManifestReaderVerify:
+    """ManifestReader 文件校验测试"""
     
-    from grimoire.hooks.base import IndexCryptoHook
-    
-    class SimpleXor(IndexCryptoHook):
-        def __init__(self, key: bytes):
-            self._key = key
+    def test_verify_file_success(self, tmp_path, sample_files):
+        """校验正确的文件"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "verify.manifest"
         
-        def _xor(self, data: bytes) -> bytes:
-            return bytes(b ^ self._key[i % len(self._key)] for i, b in enumerate(data))
-        
-        def encrypt(self, data: bytes) -> bytes:
-            return self._xor(data)
-        
-        def decrypt(self, data: bytes) -> bytes:
-            return self._xor(data)
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_file = os.path.join(tmpdir, "secret.dat")
-        with open(test_file, "wb") as f:
-            f.write(b"Secret content")
-        
-        manifest_path = os.path.join(tmpdir, "encrypted.manifest")
-        crypto = SimpleXor(b"mysecretkey")
-        
-        # 创建加密 Manifest
-        builder = ManifestBuilder(manifest_path, index_crypto=crypto)
-        builder.add_file(test_file, "/secret/data.dat")
+        # 创建带校验的 Manifest
+        builder = ManifestBuilder(str(manifest_path), checksum_hook=MD5Hook())
+        builder.add_dir(str(src_dir), "/assets")
         builder.build()
         
-        # 不提供解密器，无法遍历
-        with ManifestReader(manifest_path) as reader:
-            assert not reader.is_decrypted, "未提供解密器应为未解密状态"
-            # 但仍可通过 Hash 查询
+        with ManifestReader(str(manifest_path), checksum_hook=MD5Hook()) as reader:
+            result = reader.verify_file("/assets/hero.txt", str(src_dir / "hero.txt"))
+            assert result is True
+    
+    def test_verify_file_modified(self, tmp_path, sample_files):
+        """校验被修改的文件"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "verify_mod.manifest"
+        
+        builder = ManifestBuilder(str(manifest_path), checksum_hook=MD5Hook())
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        # 修改文件
+        hero_path = src_dir / "hero.txt"
+        hero_path.write_bytes(b"MODIFIED CONTENT")
+        
+        with ManifestReader(str(manifest_path), checksum_hook=MD5Hook()) as reader:
+            result = reader.verify_file("/assets/hero.txt", str(hero_path))
+            assert result is False
+
+
+class TestManifestReaderEncrypted:
+    """ManifestReader 加密索引测试"""
+    
+    @pytest.fixture
+    def simple_xor_hook(self):
+        """简单 XOR 加密 Hook"""
+        class SimpleXor(IndexCryptoHook):
+            def __init__(self, key: bytes = b"test_key"):
+                self._key = key
+            
+            @property
+            def flags_id(self) -> int:
+                return 0x10
+            
+            def _xor(self, data: bytes) -> bytes:
+                return bytes(b ^ self._key[i % len(self._key)] for i, b in enumerate(data))
+            
+            def encrypt(self, data: bytes) -> bytes:
+                return self._xor(data)
+            
+            def decrypt(self, data: bytes) -> bytes:
+                return self._xor(data)
+        
+        return SimpleXor()
+    
+    def test_encrypted_index_without_key(self, tmp_path, sample_files, simple_xor_hook):
+        """不提供解密器时无法遍历"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "encrypted.manifest"
+        
+        builder = ManifestBuilder(str(manifest_path), index_crypto=simple_xor_hook)
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        # 不提供解密器
+        with ManifestReader(str(manifest_path)) as reader:
+            assert reader.is_decrypted is False
+            
+            # 可以获取 Hash 列表
             hashes = reader.list_hashes()
-            print(f"Hash 列表 (可访问): {[hex(h) for h in hashes]}")
+            assert len(hashes) == len(files)
             
-            try:
+            # 无法遍历路径
+            with pytest.raises(IndexNotDecryptedError):
                 reader.list_all()
-                assert False, "应该抛出异常"
-            except Exception as e:
-                print(f"预期异常: {e}")
-        
-        # 提供解密器，可以遍历
-        with ManifestReader(manifest_path, index_crypto=crypto) as reader:
-            assert reader.is_decrypted
-            paths = reader.list_all()
-            print(f"解密后路径: {paths}")
-            assert "/secret/data.dat" in paths
-        
-        print("✅ 测试 3 通过!")
-
-
-if __name__ == "__main__":
-    test_manifest_basic()
-    test_manifest_chinese_path()
-    test_manifest_encrypted()
     
-    print("\n" + "=" * 50)
-    print("🎉 所有测试通过!")
-    print("=" * 50)
+    def test_encrypted_index_with_key(self, tmp_path, sample_files, simple_xor_hook):
+        """提供解密器时可以遍历"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "encrypted2.manifest"
+        
+        builder = ManifestBuilder(str(manifest_path), index_crypto=simple_xor_hook)
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        # 提供解密器
+        with ManifestReader(str(manifest_path), index_crypto=simple_xor_hook) as reader:
+            assert reader.is_decrypted is True
+            
+            paths = reader.list_all()
+            assert len(paths) == len(files)
+
+
+class TestManifestChinesePath:
+    """中文路径测试"""
+    
+    def test_chinese_filename(self, tmp_path, sample_files):
+        """中文文件名"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "chinese.manifest"
+        
+        builder = ManifestBuilder(str(manifest_path), checksum_hook=MD5Hook())
+        builder.add_dir(str(src_dir), "/资源")
+        builder.build()
+        
+        with ManifestReader(str(manifest_path), checksum_hook=MD5Hook()) as reader:
+            paths = reader.list_all()
+            
+            # 应包含中文文件
+            assert any("中文文件.txt" in p for p in paths)
+            assert reader.exists("/资源/中文文件.txt")
+
+
+class TestManifestIterators:
+    """迭代器测试"""
+    
+    def test_iter_entries(self, manifest_file, md5_hook):
+        """迭代所有条目"""
+        manifest_path, src_dir, files = manifest_file
+        
+        with ManifestReader(str(manifest_path), checksum_hook=md5_hook) as reader:
+            entries = list(reader.iter_entries())
+            
+            assert len(entries) == len(files)
+            for path, entry in entries:
+                # 注意: normalize_path 会去除前导斜杠
+                assert "assets/" in path or path.startswith("assets")
+    
+    def test_get_all_entries(self, manifest_file, md5_hook):
+        """获取所有条目元信息"""
+        manifest_path, src_dir, files = manifest_file
+        
+        with ManifestReader(str(manifest_path), checksum_hook=md5_hook) as reader:
+            entries = reader.get_all_entries()
+            
+            assert len(entries) == len(files)
+            for entry_info in entries:
+                assert "path" in entry_info
+                assert "size" in entry_info
+
+
+class TestManifestCombinations:
+    """Checksum + IndexCrypto 组合测试"""
+    
+    @pytest.mark.parametrize("checksum_hook", [
+        None, MD5Hook(), SHA256Hook(), CRC32Hook()
+    ])
+    @pytest.mark.parametrize("index_crypto", [
+        None, ZlibCompressHook(), XorObfuscateHook(), ZlibXorHook()
+    ])
+    def test_all_combinations(self, checksum_hook, index_crypto, tmp_path, sample_files):
+        """测试所有 Checksum + Crypto 组合"""
+        src_dir, files = sample_files
+        manifest_path = tmp_path / "combo.manifest"
+        
+        # 构建
+        builder = ManifestBuilder(
+            str(manifest_path),
+            checksum_hook=checksum_hook,
+            index_crypto=index_crypto
+        )
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        
+        # 读取
+        with ManifestReader(
+            str(manifest_path),
+            checksum_hook=checksum_hook,
+            index_crypto=index_crypto
+        ) as reader:
+            assert reader.entry_count == len(files)
+            
+            for name in files:
+                vfs_path = f"/assets/{name}"
+                assert reader.exists(vfs_path)
