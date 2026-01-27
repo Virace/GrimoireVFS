@@ -73,8 +73,9 @@ class ManifestBuilder:
         if vfs_path is None:
             vfs_path = "/" + os.path.basename(local_path)
         
-        # 3. 规范化并拆分路径
-        normalized = normalize_path(vfs_path)
+        # 3. 规范化并拆分路径（保留原始前导斜杠状态）
+        is_absolute = vfs_path.startswith('/') or vfs_path.startswith('\\')
+        normalized = normalize_path(vfs_path, absolute=is_absolute)
         dir_part, name, ext = split_path(normalized)
         
         # 4. 计算 path_hash 并检查冲突

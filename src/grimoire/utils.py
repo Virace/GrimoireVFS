@@ -67,6 +67,7 @@ def split_path(full_path: str) -> Tuple[str, str, str]:
     拆分完整路径为 (目录, 文件名, 扩展名)
     
     文件名不含扩展名，扩展名包含点号。
+    保留原始路径的前导斜杠状态（尊重用户输入）。
     
     Args:
         full_path: 完整路径
@@ -81,13 +82,17 @@ def split_path(full_path: str) -> Tuple[str, str, str]:
         ('/', 'config', '.json')
         >>> split_path("/data/README")
         ('/data', 'README', '')
+        >>> split_path("DATA/file.txt")
+        ('DATA', 'file', '.txt')
     """
-    normalized = normalize_path(full_path)
+    # 检测原始路径是否以 / 开头，尊重用户输入
+    is_absolute = full_path.startswith('/') or full_path.startswith('\\')
+    normalized = normalize_path(full_path, absolute=is_absolute)
     
     # 分离目录和文件名
     dir_part = os.path.dirname(normalized)
     if not dir_part:
-        dir_part = "/"
+        dir_part = "/" if is_absolute else ""
     
     basename = os.path.basename(normalized)
     
