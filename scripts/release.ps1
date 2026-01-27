@@ -225,8 +225,58 @@ if ($DryRun) {
     Write-Host "`n⚠️  模拟模式 - 不会执行任何实际操作`n" -ForegroundColor Yellow
 }
 
+# 检查 Git 工作区状态
+Write-Host "`n🔍 检查 Git 工作区状态..." -ForegroundColor White
+
+# 获取暂存区的文件 (已 add 但未 commit)
+$stagedFiles = & git diff --cached --name-only 2>&1
+if ($stagedFiles) {
+    Write-Host "`n❌ 错误: 暂存区有未提交的文件!" -ForegroundColor Red
+    Write-Host "   请先提交或取消暂存以下文件:" -ForegroundColor Red
+    foreach ($file in $stagedFiles) {
+        Write-Host "     - $file" -ForegroundColor Yellow
+    }
+    Write-Host "`n   提示: 使用 'git commit' 提交或 'git restore --staged .' 取消暂存" -ForegroundColor Gray
+    exit 1
+}
+
+# 获取未跟踪的文件
+$untrackedFiles = & git ls-files --others --exclude-standard 2>&1
+# 获取已修改但未暂存的文件
+$modifiedFiles = & git diff --name-only 2>&1
+
+$hasWarnings = $false
+
+if ($untrackedFiles) {
+    $hasWarnings = $true
+    Write-Host "`n⚠️  警告: 检测到未跟踪的新文件:" -ForegroundColor Yellow
+    foreach ($file in $untrackedFiles) {
+        Write-Host "     + $file" -ForegroundColor Yellow
+    }
+}
+
+if ($modifiedFiles) {
+    $hasWarnings = $true
+    Write-Host "`n⚠️  警告: 检测到已修改但未暂存的文件:" -ForegroundColor Yellow
+    foreach ($file in $modifiedFiles) {
+        Write-Host "     ~ $file" -ForegroundColor Yellow
+    }
+}
+
+if ($hasWarnings) {
+    Write-Host "`n   这些文件不会包含在本次发布中。" -ForegroundColor Gray
+    $continue = Read-Host "   是否继续? [y/N]"
+    if ($continue -ne "y" -and $continue -ne "Y") {
+        Write-Host "已取消" -ForegroundColor Yellow
+        exit 0
+    }
+} else {
+    Write-Host "✅ 工作区干净" -ForegroundColor Green
+}
+
 $currentVersion = Get-CurrentVersion
 Write-Host "`n📦 当前版本: $currentVersion" -ForegroundColor White
+
 
 # 显示选项
 Write-Host "`n请选择版本类型:" -ForegroundColor White
