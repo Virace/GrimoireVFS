@@ -12,6 +12,12 @@ from .checksum import (
 )
 from .crypto import ZlibCompressHook, XorObfuscateHook, ZlibXorHook
 from .rclone import RcloneHashHook, RcloneNotFoundError, rclone_hash
+from .registry import (
+    get_checksum_hook_by_id,
+    get_index_crypto_by_flags,
+    get_hook_name,
+    CHECKSUM_REGISTRY,
+)
 
 __all__ = [
     # 抽象基类
@@ -33,6 +39,11 @@ __all__ = [
     "RcloneHashHook",
     "RcloneNotFoundError",
     "rclone_hash",
+    # 注册表
+    "get_checksum_hook_by_id",
+    "get_index_crypto_by_flags",
+    "get_hook_name",
+    "CHECKSUM_REGISTRY",
 ]
 
 

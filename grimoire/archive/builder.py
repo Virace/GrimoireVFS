@@ -12,7 +12,7 @@ from typing import Optional, List, Dict, Callable
 from ..core.binary_io import BinaryWriter
 from ..core.schema import (
     FileHeader, IndexHeader, DataHeader, ArchiveEntry,
-    MODE_ARCHIVE, FLAG_INDEX_ENCRYPTED, ENTRY_FLAG_COMPRESSED
+    MODE_ARCHIVE, ENTRY_FLAG_COMPRESSED
 )
 from ..core.string_table import PathDictionary
 from ..hooks.base import CompressionHook, ChecksumHook, IndexCryptoHook
@@ -327,7 +327,7 @@ class ArchiveBuilder:
                 magic=self._magic,
                 version=3,
                 mode=MODE_ARCHIVE,
-                flags=FLAG_INDEX_ENCRYPTED if self._index_crypto else 0,
+                flags=self._index_crypto.flags_id if self._index_crypto else 0,
                 checksum_algo=self._checksum_hook.algo_id if self._checksum_hook else 0,
                 index_offset=index_start,
                 index_size=index_size,

@@ -80,6 +80,18 @@ class ChecksumHook(ABC):
         pass
     
     @property
+    def display_name(self) -> str:
+        """
+        可读名称 (用于 JSON 显示)
+        
+        默认返回类名，子类可覆盖提供更友好的名称。
+        
+        Returns:
+            可读名称字符串
+        """
+        return type(self).__name__
+    
+    @property
     @abstractmethod
     def digest_size(self) -> int:
         """
@@ -118,7 +130,6 @@ class ChecksumHook(ABC):
         """
         return self.compute(data) == expected
 
-
 class IndexCryptoHook(ABC):
     """
     索引加密钩子
@@ -126,6 +137,32 @@ class IndexCryptoHook(ABC):
     用于加密/解密 String Tables 区域。
     注意：只用于索引区，不用于数据区。
     """
+    
+    @property
+    @abstractmethod
+    def flags_id(self) -> int:
+        """
+        标志位 ID
+        
+        对应 FileHeader 中的 flags 字段。
+        用于标识使用了什么类型的索引加密/压缩。
+        
+        Returns:
+            标志位值 (e.g., 0x01, 0x02, 0x03)
+        """
+        pass
+    
+    @property
+    def display_name(self) -> str:
+        """
+        可读名称 (用于 JSON 显示)
+        
+        默认返回类名，子类可覆盖提供更友好的名称。
+        
+        Returns:
+            可读名称字符串
+        """
+        return type(self).__name__
     
     @abstractmethod
     def encrypt(self, data: bytes) -> bytes:

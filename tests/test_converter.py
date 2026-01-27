@@ -48,19 +48,17 @@ def test_manifest_to_json():
         builder.add_dir(test_dir, "/assets")
         builder.build()
         
-        # 转换为 JSON
+        # 转换为 JSON (自动检测 Hook)
         json_path = os.path.join(tmpdir, "test.json")
-        ManifestJsonConverter.manifest_to_json(
-            manifest_path, json_path,
-            checksum_hook=MD5Hook()
-        )
+        ManifestJsonConverter.manifest_to_json(manifest_path, json_path)
         
         # 读取验证
         with open(json_path, 'r', encoding='utf-8') as f:
             import json
             data = json.load(f)
             print(f"版本: {data['version']}")
-            print(f"校验Hook: {data['checksum_hook']}")
+            print(f"校验算法ID: {data['checksum_algo']}")
+            print(f"索引标志: {data['index_flags']}")
             print(f"条目数: {data['entry_count']}")
             for entry in data['entries']:
                 print(f"  {entry['path']} ({entry['size']} bytes)")

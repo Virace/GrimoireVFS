@@ -15,6 +15,15 @@ class ZlibCompressHook(IndexCryptoHook):
     这不是加密，只是压缩，可以减少索引区体积。
     """
     
+    # flags_id = 0x02 (FLAG_INDEX_COMPRESSED)
+    @property
+    def flags_id(self) -> int:
+        return 0x02
+    
+    @property
+    def display_name(self) -> str:
+        return "zlib"
+    
     def __init__(self, level: int = 6):
         """
         Args:
@@ -38,6 +47,15 @@ class XorObfuscateHook(IndexCryptoHook):
     使用固定 key 进行 XOR 混淆，提供基本的索引保护。
     注意：这不是安全的加密，仅用于防止直接查看。
     """
+    
+    # flags_id = 0x01 (FLAG_INDEX_ENCRYPTED)
+    @property
+    def flags_id(self) -> int:
+        return 0x01
+    
+    @property
+    def display_name(self) -> str:
+        return "xor"
     
     def __init__(self, key: bytes = b'GrimoireVFS'):
         """
@@ -63,6 +81,15 @@ class ZlibXorHook(IndexCryptoHook):
     
     结合压缩和混淆，既减少体积又提供基本保护。
     """
+    
+    # flags_id = 0x03 (FLAG_INDEX_COMPRESSED | FLAG_INDEX_ENCRYPTED)
+    @property
+    def flags_id(self) -> int:
+        return 0x03
+    
+    @property
+    def display_name(self) -> str:
+        return "zlib_xor"
     
     def __init__(self, key: bytes = b'GrimoireVFS', level: int = 6):
         self._zlib = ZlibCompressHook(level)

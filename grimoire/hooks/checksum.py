@@ -23,6 +23,10 @@ class NoneChecksumHook(ChecksumHook):
         return 0
     
     @property
+    def display_name(self) -> str:
+        return "none"
+    
+    @property
     def digest_size(self) -> int:
         return 0
     
@@ -43,6 +47,10 @@ class CRC32Hook(ChecksumHook):
     @property
     def algo_id(self) -> int:
         return 1
+    
+    @property
+    def display_name(self) -> str:
+        return "crc32"
     
     @property
     def digest_size(self) -> int:
@@ -66,6 +74,10 @@ class MD5Hook(ChecksumHook):
         return 2
     
     @property
+    def display_name(self) -> str:
+        return "md5"
+    
+    @property
     def digest_size(self) -> int:
         return 16
     
@@ -85,6 +97,10 @@ class SHA1Hook(ChecksumHook):
         return 3
     
     @property
+    def display_name(self) -> str:
+        return "sha1"
+    
+    @property
     def digest_size(self) -> int:
         return 20
     
@@ -102,6 +118,10 @@ class SHA256Hook(ChecksumHook):
     @property
     def algo_id(self) -> int:
         return 4
+    
+    @property
+    def display_name(self) -> str:
+        return "sha256"
     
     @property
     def digest_size(self) -> int:

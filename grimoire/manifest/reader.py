@@ -11,7 +11,7 @@ import os
 from typing import Optional, List, Dict, Callable
 
 from ..core.binary_io import BinaryReader
-from ..core.schema import FileHeader, IndexHeader, ManifestEntry, MODE_MANIFEST, FLAG_INDEX_ENCRYPTED
+from ..core.schema import FileHeader, IndexHeader, ManifestEntry, MODE_MANIFEST
 from ..core.string_table import PathDictionary
 from ..hooks.base import ChecksumHook, IndexCryptoHook
 from ..utils import normalize_path, default_path_hash
@@ -88,11 +88,12 @@ class ManifestReader:
         # ========== 3. 读取 String Tables ==========
         string_data = self._reader.read_bytes(self._index_header.string_table_size)
         
-        is_encrypted = bool(self._file_header.flags & FLAG_INDEX_ENCRYPTED)
+        # flags 非零表示索引区需要处理 (压缩/加密)
+        needs_processing = self._file_header.flags != 0
         
-        if is_encrypted:
+        if needs_processing:
             if self._index_crypto:
-                # 解密
+                # 解密/解压
                 string_data = self._index_crypto.decrypt(string_data)
                 self._index_decrypted = True
             else:

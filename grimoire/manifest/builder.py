@@ -10,7 +10,7 @@ import os
 from typing import Optional, List, Callable
 
 from ..core.binary_io import BinaryWriter
-from ..core.schema import FileHeader, IndexHeader, ManifestEntry, MODE_MANIFEST, FLAG_INDEX_ENCRYPTED
+from ..core.schema import FileHeader, IndexHeader, ManifestEntry, MODE_MANIFEST
 from ..core.string_table import PathDictionary
 from ..hooks.base import ChecksumHook, IndexCryptoHook
 from ..utils import normalize_path, split_path, default_path_hash
@@ -223,7 +223,7 @@ class ManifestBuilder:
             writer.write_bytes(index_header.pack())
             
             # ========== 6. 回写 FileHeader ==========
-            flags = FLAG_INDEX_ENCRYPTED if self._index_crypto else 0
+            flags = self._index_crypto.flags_id if self._index_crypto else 0
             
             file_header = FileHeader(
                 magic=self._magic,

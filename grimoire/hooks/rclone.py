@@ -80,6 +80,11 @@ class RcloneHashHook(ChecksumHook):
         if check_on_init:
             self._check_rclone()
     
+    @property
+    def display_name(self) -> str:
+        """返回 rclone:algorithm 格式的可读名称"""
+        return f"rclone:{self._algorithm}"
+    
     def _check_rclone(self) -> None:
         """检查 rclone 是否可用"""
         try:
