@@ -43,38 +43,13 @@ function Write-Step {
     }
 }
 
-function Invoke-Command-Safe {
-    param(
-        [string]$Command,
-        [switch]$Capture,
-        [switch]$AllowFailure
-    )
-    
-    if ($DryRun -and -not $Capture) {
-        Write-Host "  > $Command" -ForegroundColor DarkGray
-        return ""
-    }
-    
-    if ($Capture) {
-        $result = Invoke-Expression $Command 2>&1
-        if ($LASTEXITCODE -ne 0 -and -not $AllowFailure) {
-            Write-Host "❌ 命令执行失败: $Command" -ForegroundColor Red
-            Write-Host $result -ForegroundColor Red
-            exit 1
-        }
-        return $result
-    } else {
-        Invoke-Expression $Command
-        if ($LASTEXITCODE -ne 0 -and -not $AllowFailure) {
-            Write-Host "❌ 命令执行失败: $Command" -ForegroundColor Red
-            exit 1
-        }
-    }
-}
-
 function Get-CurrentVersion {
-    $version = Invoke-Command-Safe "uv version --short" -Capture
-    return $version.Trim()
+    $output = & uv version --short 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "❌ 获取版本失败" -ForegroundColor Red
+        exit 1
+    }
+    return $output.Trim()
 }
 
 function Test-IsPrerelease {
@@ -89,6 +64,22 @@ function Convert-VersionToTag {
     return "v$tag"
 }
 
+function Invoke-UvBump {
+    param([string[]]$BumpArgs)
+    
+    if ($DryRun) {
+        Write-Host "  > uv version $($BumpArgs -join ' ')" -ForegroundColor DarkGray
+        return
+    }
+    
+    $argList = @("version") + $BumpArgs
+    & uv @argList 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "❌ 版本更新失败" -ForegroundColor Red
+        exit 1
+    }
+}
+
 function Update-Version {
     param([string]$BumpType)
     
@@ -99,67 +90,90 @@ function Update-Version {
     
     if ($BumpType -eq "dev") {
         if ($isDevVersion) {
-            # 已经是 dev 版本，只递增 dev 号
-            Invoke-Command-Safe "uv version --bump dev --no-sync"
+            Invoke-UvBump "--bump", "dev", "--no-sync"
         } else {
-            # 稳定版，递增 patch 并加 dev
-            Invoke-Command-Safe "uv version --bump patch --bump dev --no-sync"
+            Invoke-UvBump "--bump", "patch", "--bump", "dev", "--no-sync"
         }
     } else {
-        # patch/minor/major
         if ($isDevVersion) {
-            # 预发布版本，升级为稳定版
-            Invoke-Command-Safe "uv version --bump stable --no-sync"
+            Invoke-UvBump "--bump", "stable", "--no-sync"
         } else {
-            # 稳定版，递增指定版本
-            Invoke-Command-Safe "uv version --bump $BumpType --no-sync"
+            Invoke-UvBump "--bump", $BumpType, "--no-sync"
         }
     }
     
     if ($DryRun) {
         # 模拟模式下预测新版本
-        if ($BumpType -eq "dev") {
-            if ($isDevVersion) {
-                # 0.1.1.dev1 -> 0.1.1.dev2
-                if ($current -match "\.dev(\d+)$") {
-                    $devNum = [int]$Matches[1] + 1
-                    return $current -replace "\.dev\d+$", ".dev$devNum"
-                }
-            } else {
-                # 0.1.0 -> 0.1.1.dev1
-                $parts = $current -split "\."
-                $parts[2] = [int]$parts[2] + 1
-                return "$($parts -join '.').dev1"
-            }
-        } elseif ($BumpType -eq "patch") {
-            if ($isDevVersion) {
-                return $current -replace "\.dev\d+$", ""
-            }
-            $parts = $current -split "\."
-            $parts[2] = [int]$parts[2] + 1
-            return $parts -join "."
-        } elseif ($BumpType -eq "minor") {
-            if ($isDevVersion) {
-                return $current -replace "\.dev\d+$", ""
-            }
-            $parts = $current -split "\."
-            $parts[1] = [int]$parts[1] + 1
-            $parts[2] = 0
-            return $parts -join "."
-        } elseif ($BumpType -eq "major") {
-            if ($isDevVersion) {
-                return $current -replace "\.dev\d+$", ""
-            }
-            $parts = $current -split "\."
-            $parts[0] = [int]$parts[0] + 1
-            $parts[1] = 0
-            $parts[2] = 0
-            return $parts -join "."
-        }
-        return $current
+        return Get-PredictedVersion $current $BumpType $isDevVersion
     }
     
     return Get-CurrentVersion
+}
+
+function Get-PredictedVersion {
+    param(
+        [string]$Current,
+        [string]$BumpType,
+        [bool]$IsDevVersion
+    )
+    
+    if ($BumpType -eq "dev") {
+        if ($IsDevVersion) {
+            if ($Current -match "\.dev(\d+)$") {
+                $devNum = [int]$Matches[1] + 1
+                return $Current -replace "\.dev\d+$", ".dev$devNum"
+            }
+        } else {
+            $parts = $Current -split "\."
+            $parts[2] = [int]$parts[2] + 1
+            return "$($parts -join '.').dev1"
+        }
+    } elseif ($BumpType -eq "patch") {
+        if ($IsDevVersion) {
+            return $Current -replace "\.dev\d+$", ""
+        }
+        $parts = $Current -split "\."
+        $parts[2] = [int]$parts[2] + 1
+        return $parts -join "."
+    } elseif ($BumpType -eq "minor") {
+        if ($IsDevVersion) {
+            return $Current -replace "\.dev\d+$", ""
+        }
+        $parts = $Current -split "\."
+        $parts[1] = [int]$parts[1] + 1
+        $parts[2] = 0
+        return $parts -join "."
+    } elseif ($BumpType -eq "major") {
+        if ($IsDevVersion) {
+            return $Current -replace "\.dev\d+$", ""
+        }
+        $parts = $Current -split "\."
+        $parts[0] = [int]$parts[0] + 1
+        $parts[1] = 0
+        $parts[2] = 0
+        return $parts -join "."
+    }
+    return $Current
+}
+
+function Invoke-GitCommand {
+    param(
+        [string]$Description,
+        [string[]]$GitArgs
+    )
+    
+    $cmdLine = "git $($GitArgs -join ' ')"
+    
+    if ($DryRun) {
+        Write-Host "  > $cmdLine" -ForegroundColor DarkGray
+        return
+    }
+    
+    & git @GitArgs 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "❌ $Description 失败" -ForegroundColor Red
+        exit 1
+    }
 }
 
 function New-GitCommitAndTag {
@@ -169,7 +183,7 @@ function New-GitCommitAndTag {
     )
     
     Write-Step "📝 创建 Git commit..."
-    Invoke-Command-Safe "git add pyproject.toml uv.lock"
+    Invoke-GitCommand "添加文件" "add", "pyproject.toml", "uv.lock"
     
     if (Test-IsPrerelease $Version) {
         $msg = "chore: bump version to $Version"
@@ -177,18 +191,18 @@ function New-GitCommitAndTag {
         $msg = "chore: release $Version"
     }
     
-    Invoke-Command-Safe "git commit -m `"$msg`""
+    Invoke-GitCommand "创建 commit" "commit", "-m", $msg
     Write-Host "✅ 已创建 commit: $msg" -ForegroundColor Green
     
     Write-Step "🏷️ 创建 Git tag..."
-    Invoke-Command-Safe "git tag $Tag"
+    Invoke-GitCommand "创建 tag" "tag", $Tag
     Write-Host "✅ 已创建 tag: $Tag" -ForegroundColor Green
 }
 
 function Push-ToRemote {
     Write-Step "📤 推送到远程仓库..."
-    Invoke-Command-Safe "git push"
-    Invoke-Command-Safe "git push --tags"
+    Invoke-GitCommand "推送代码" "push"
+    Invoke-GitCommand "推送 tags" "push", "--tags"
     Write-Host "✅ 推送完成!" -ForegroundColor Green
 }
 
@@ -197,7 +211,7 @@ function Restore-Version {
     
     if (-not $DryRun) {
         Write-Host "⏪ 回滚版本..." -ForegroundColor Yellow
-        Invoke-Command-Safe "uv version $OriginalVersion --no-sync"
+        & uv version $OriginalVersion --no-sync 2>&1 | Out-Null
     }
 }
 
