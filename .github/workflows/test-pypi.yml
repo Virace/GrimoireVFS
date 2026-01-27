@@ -1,0 +1,133 @@
+# 发布到 Test-PyPI 测试环境
+# 触发条件:
+#   1. 手动触发 (workflow_dispatch) - 推荐方式
+#   2. push 到 main/dev 分支，且 commit message 包含版本指令:
+#      - [bump:dev]   -> 递增 dev 版本 (0.1.0 -> 0.1.1.dev1)
+#      - [bump:patch] -> 递增 patch 版本 (0.1.0 -> 0.1.1.dev1)  
+#      - [bump:minor] -> 递增 minor 版本 (0.1.0 -> 0.2.0.dev1)
+#      - [bump:major] -> 递增 major 版本 (0.1.0 -> 1.0.0.dev1)
+
+name: Publish to Test-PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: '版本递增类型 (会自动附加 .dev 后缀)'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - dev      # 仅递增 dev 号: 0.2.0.dev1 -> 0.2.0.dev2
+          - patch    # 递增 patch: 0.1.0 -> 0.1.1.dev1
+          - minor    # 递增 minor: 0.1.0 -> 0.2.0.dev1
+          - major    # 递增 major: 0.1.0 -> 1.0.0.dev1
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: write  # 需要写权限来更新版本号
+
+jobs:
+  # 解析触发条件和版本类型
+  parse-trigger:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.parse.outputs.should_run }}
+      bump_type: ${{ steps.parse.outputs.bump_type }}
+    steps:
+      - name: 解析触发条件
+        id: parse
+        run: |
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "bump_type=${{ github.event.inputs.bump_type }}" >> $GITHUB_OUTPUT
+          elif [[ "$COMMIT_MSG" =~ \[bump:(dev|patch|minor|major)\] ]]; then
+            BUMP_TYPE="${BASH_REMATCH[1]}"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+            echo "检测到版本指令: [bump:$BUMP_TYPE]"
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "未检测到版本指令，跳过发布"
+          fi
+
+  # 运行测试
+  test:
+    needs: parse-trigger
+    if: needs.parse-trigger.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 安装依赖
+        run: uv sync --group dev
+
+      - name: 运行测试
+        run: uv run pytest -v
+
+  # 构建并发布
+  publish:
+    needs: [parse-trigger, test]
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/grimoirevfs/
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 递增版本号
+        id: bump
+        run: |
+          BUMP_TYPE="${{ needs.parse-trigger.outputs.bump_type }}"
+          CURRENT_VERSION=$(uv version --short)
+          echo "当前版本: $CURRENT_VERSION"
+          
+          # 如果当前不是 dev 版本，需要先 bump 到目标版本再加 dev
+          if [[ ! "$CURRENT_VERSION" =~ \.dev ]]; then
+            if [[ "$BUMP_TYPE" != "dev" ]]; then
+              # 先 bump 主版本，再加 dev 后缀
+              uv version --bump $BUMP_TYPE --bump dev --no-sync
+            else
+              # 如果已经是稳定版，bump dev 会自动递增 patch 并加 dev
+              uv version --bump patch --bump dev --no-sync
+            fi
+          else
+            # 已经是 dev 版本，只递增 dev 号
+            uv version --bump dev --no-sync
+          fi
+          
+          NEW_VERSION=$(uv version --short)
+          echo "新版本: $NEW_VERSION"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: 提交版本更新
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml uv.lock
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.new_version }} [skip ci]" || echo "No changes to commit"
+          git push
+
+      - name: 构建包
+        run: uv build
+
+      - name: 发布到 Test-PyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: uv publish --index testpypi
