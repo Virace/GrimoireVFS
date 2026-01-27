@@ -67,26 +67,21 @@ class TestSplitPath:
     """split_path 测试"""
     
     @pytest.mark.parametrize("input_path,expected", [
-        # 标准三部分路径 (注意: normalize_path 会去除前导斜杠)
-        ("/Game/MOD/hero_skin.wad", ("Game/MOD", "hero_skin", ".wad")),
-        ("Game/MOD/hero.txt", ("Game/MOD", "hero", ".txt")),
-        
-        # 根目录文件 (无目录时返回 "/")
+        # 带前导斜杠的路径 (保留前导斜杠)
+        ("/Game/MOD/hero_skin.wad", ("/Game/MOD", "hero_skin", ".wad")),
         ("/config.json", ("/", "config", ".json")),
-        ("config.json", ("/", "config", ".json")),
+        ("/data/archive.tar.gz", ("/data", "archive.tar", ".gz")),
+        ("/bin/executable", ("/bin", "executable", "")),
+        ("/dir/.gitignore", ("/dir", ".gitignore", "")),
+        ("/a/b/c/d/file.ext", ("/a/b/c/d", "file", ".ext")),
         
-        # 多重扩展名
-        ("/data/archive.tar.gz", ("data", "archive.tar", ".gz")),
+        # 不带前导斜杠的路径 (保持相对路径)
+        ("Game/MOD/hero.txt", ("Game/MOD", "hero", ".txt")),
+        ("data/archive.tar.gz", ("data", "archive.tar", ".gz")),
         
-        # 无扩展名
-        ("/bin/executable", ("bin", "executable", "")),
-        
-        # 隐藏文件
-        (".hidden", ("/", ".hidden", "")),
-        ("/dir/.gitignore", ("dir", ".gitignore", "")),
-        
-        # 深层嵌套
-        ("/a/b/c/d/file.ext", ("a/b/c/d", "file", ".ext")),
+        # 根目录下的单个文件
+        ("config.json", ("", "config", ".json")),  # 相对路径，无目录
+        (".hidden", ("", ".hidden", "")),          # 隐藏文件，相对路径
     ])
     def test_split(self, input_path, expected):
         """路径分割测试"""
@@ -96,8 +91,8 @@ class TestSplitPath:
     def test_empty_path(self):
         """空路径"""
         result = split_path("")
-        # 空路径时目录返回 "/", 文件名和扩展名为空
-        assert result == ("/", "", "")
+        # 空路径时目录返回空字符串, 文件名和扩展名为空
+        assert result == ("", "", "")
 
 
 # ==================== default_path_hash 测试 ====================

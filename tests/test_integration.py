@@ -142,7 +142,7 @@ class TestFullConversionChain:
             str(manifest_path),
             compression_hooks=[ZlibHook()],
             checksum_hook=MD5Hook(),
-            index_crypto=ZlibCompressHook()
+            index_crypto_read=ZlibCompressHook()
         )
         
         # Step 3: Manifest → JSON
