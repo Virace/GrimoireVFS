@@ -1,10 +1,12 @@
 # 发布到 PyPI 生产环境
+#
 # 触发条件: 创建 GitHub Release
-# 
-# 流程:
-#   1. 从 Release tag (如 v0.2.0) 提取版本号
-#   2. 自动更新 pyproject.toml 中的版本为正式版 (移除 .dev 后缀)
-#   3. 运行测试 → 构建 → 发布到 PyPI
+#
+# 使用方法:
+#   1. 确保 pyproject.toml 中的版本号是正式版 (如 0.2.0，不带 dev/a/b/rc 后缀)
+#   2. git commit + push
+#   3. 在 GitHub 上创建 Release (tag: v0.2.0)
+#   4. 工作流自动运行测试并发布到 PyPI
 
 name: Publish to PyPI
 
@@ -13,10 +15,14 @@ on:
     types: [published]
 
 permissions:
-  contents: write  # 需要写权限来更新版本号
+  contents: read
+
+# 防止多个发布同时运行
+concurrency:
+  group: pypi-publish
+  cancel-in-progress: false
 
 jobs:
-  # 发布前运行测试确保代码质量
   test:
     runs-on: ubuntu-latest
     steps:
@@ -33,13 +39,11 @@ jobs:
       - name: 运行测试
         run: uv run pytest -v
 
-  # 构建并发布
   publish:
     needs: test
     runs-on: ubuntu-latest
     permissions:
       id-token: write  # Trusted Publishing 必需
-      contents: write
 
     environment:
       name: pypi
@@ -47,34 +51,28 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 安装 uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
 
-      - name: 从 Release tag 提取并设置版本号
-        id: version
+      - name: 验证版本号
         run: |
-          # 从 tag 提取版本号 (v0.2.0 -> 0.2.0)
-          TAG_NAME="${{ github.event.release.tag_name }}"
-          VERSION="${TAG_NAME#v}"
-          echo "从 tag 提取版本: $VERSION"
+          VERSION=$(uv version --short)
+          TAG="${{ github.event.release.tag_name }}"
+          TAG_VERSION="${TAG#v}"
           
-          # 设置为正式版本
-          uv version $VERSION --no-sync
+          echo "pyproject.toml 版本: $VERSION"
+          echo "Release tag 版本: $TAG_VERSION"
           
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: 提交版本更新
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml uv.lock
-          git diff --staged --quiet || git commit -m "chore: release version ${{ steps.version.outputs.version }} [skip ci]"
-          git push
+          if [[ "$VERSION" != "$TAG_VERSION" ]]; then
+            echo "❌ 错误: 版本号不匹配！"
+            echo "请确保 pyproject.toml 中的版本号与 Release tag 一致"
+            exit 1
+          fi
+          
+          echo "✅ 版本号验证通过"
 
       - name: 构建发布包
         run: uv build

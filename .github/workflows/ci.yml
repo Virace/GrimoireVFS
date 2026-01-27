@@ -1,4 +1,4 @@
-# 测试工作流
+# CI 测试工作流
 # 触发条件: push 到 main/dev 分支, 或 PR
 
 name: CI
@@ -39,10 +39,3 @@ jobs:
 
       - name: 运行测试
         run: uv run pytest -v --cov=grimoire --cov-report=term-missing
-
-      - name: 上传覆盖率报告
-        if: matrix.python-version == '3.11'
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: .coverage
