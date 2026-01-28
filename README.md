@@ -1,8 +1,10 @@
 # GrimoireVFS
 
-[![Python](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.0-orange.svg)](https://github.com/Virace/GrimoireVFS)
+[![PyPI Version](https://img.shields.io/pypi/v/grimoirevfs?label=PyPI&logo=pypi&logoColor=white)](https://pypi.org/project/grimoirevfs/)
+[![Python Version](https://img.shields.io/pypi/pyversions/grimoirevfs?logo=python&logoColor=white)](https://pypi.org/project/grimoirevfs/)
+[![CI](https://github.com/Virace/GrimoireVFS/actions/workflows/ci.yml/badge.svg)](https://github.com/Virace/GrimoireVFS/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/Virace/GrimoireVFS)](LICENSE)
+[![Downloads](https://img.shields.io/pypi/dm/grimoirevfs?label=Downloads&logo=pypi&logoColor=white)](https://pypi.org/project/grimoirevfs/)
 
 轻量级零依赖 Python 二进制资源管理库。
 
