@@ -37,6 +37,20 @@ jobs:
         with:
           enable-cache: true
 
+      - name: 安装 rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: 安装 fhash
+        run: |
+          FHASH_VERSION=$(curl -s https://api.github.com/repos/Virace/fast-hasher/releases/latest | grep -oP '"tag_name": "\K[^"]+')
+          curl -L "https://github.com/Virace/fast-hasher/releases/download/${FHASH_VERSION}/fhash-linux-amd64.tar.gz" -o fhash.tar.gz
+          tar -xzf fhash.tar.gz
+          sudo mv fhash-linux-amd64 /usr/local/bin/fhash
+          sudo chmod +x /usr/local/bin/fhash
+          fhash -v
+
       - name: 安装依赖
         run: uv sync --group dev
 

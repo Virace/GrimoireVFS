@@ -34,8 +34,28 @@ jobs:
       - name: 设置 Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
+      - name: 安装 rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: 安装 fhash
+        run: |
+          # 获取最新版本
+          FHASH_VERSION=$(curl -s https://api.github.com/repos/Virace/fast-hasher/releases/latest | grep -oP '"tag_name": "\K[^"]+')
+          echo "安装 fhash ${FHASH_VERSION}"
+          
+          # 下载并解压
+          curl -L "https://github.com/Virace/fast-hasher/releases/download/${FHASH_VERSION}/fhash-linux-amd64.tar.gz" -o fhash.tar.gz
+          tar -xzf fhash.tar.gz
+          
+          # 安装到 PATH
+          sudo mv fhash-linux-amd64 /usr/local/bin/fhash
+          sudo chmod +x /usr/local/bin/fhash
+          fhash -v
+
       - name: 安装依赖
         run: uv sync --group dev
 
-      - name: 运行测试
+      - name: 运行测试 (完整测试包含 fhash 和 rclone)
         run: uv run pytest -v --cov=grimoire --cov-report=term-missing
