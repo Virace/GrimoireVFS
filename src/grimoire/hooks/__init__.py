@@ -11,12 +11,23 @@ from .checksum import (
     NoneChecksumHook, CRC32Hook, MD5Hook, SHA1Hook, SHA256Hook
 )
 from .crypto import ZlibCompressHook, XorObfuscateHook, ZlibXorHook
+from .fhash import FhashHook, FhashNotFoundError, fhash_hash
 from .rclone import RcloneHashHook, RcloneNotFoundError, rclone_hash
+from .external import (
+    ExternalToolLocator,
+    ExternalToolManager,
+    ToolInfo,
+    get_tool_manager,
+)
 from .registry import (
     get_checksum_hook_by_id,
     get_index_crypto_by_flags,
     get_hook_name,
+    get_best_checksum_hook,
+    get_external_checksum_hook,
     CHECKSUM_REGISTRY,
+    ALGORITHM_REGISTRY,
+    ID_TO_ALGORITHM,
 )
 
 __all__ = [
@@ -35,16 +46,26 @@ __all__ = [
     "ZlibCompressHook",
     "XorObfuscateHook",
     "ZlibXorHook",
-    # Rclone 兼容
+    # fhash 外置工具
+    "FhashHook",
+    "FhashNotFoundError",
+    "fhash_hash",
+    # rclone 外置工具
     "RcloneHashHook",
     "RcloneNotFoundError",
     "rclone_hash",
+    # 外置工具管理
+    "ExternalToolLocator",
+    "ExternalToolManager",
+    "ToolInfo",
+    "get_tool_manager",
     # 注册表
     "get_checksum_hook_by_id",
     "get_index_crypto_by_flags",
     "get_hook_name",
+    "get_best_checksum_hook",
+    "get_external_checksum_hook",
     "CHECKSUM_REGISTRY",
+    "ALGORITHM_REGISTRY",
+    "ID_TO_ALGORITHM",
 ]
-
-
-

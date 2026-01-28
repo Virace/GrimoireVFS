@@ -3,16 +3,39 @@
 """
 Hook 注册表
 
-自动从 Hook 类收集 algo_id，提供根据 ID 查找 Hook 的功能。
+提供统一的算法 ID 映射和 Hook 查找功能。
+支持内置 Python 实现和外置工具 (fhash, rclone)。
 """
 
-from typing import Dict, Type, Optional, TYPE_CHECKING
+from typing import Dict, Type, Optional, Tuple, TYPE_CHECKING
 
 from .base import ChecksumHook, IndexCryptoHook
 from .checksum import NoneChecksumHook, CRC32Hook, MD5Hook, SHA1Hook, SHA256Hook
 
 if TYPE_CHECKING:
+    from .fhash import FhashHook
     from .rclone import RcloneHashHook
+
+
+# ==================== 统一算法 ID 映射表 ====================
+
+# 算法名 -> (algo_id, digest_size)
+# 这是全局唯一的算法定义,所有 Hook 实现必须使用相同的 ID
+ALGORITHM_REGISTRY: Dict[str, Tuple[int, int]] = {
+    'none':     (0, 0),
+    'crc32':    (1, 4),
+    'md5':      (2, 16),
+    'sha1':     (3, 20),
+    'sha256':   (4, 32),
+    'sha512':   (5, 64),
+    'blake3':   (6, 32),
+    'xxh3':     (7, 8),
+    'xxh128':   (8, 16),
+    'quickxor': (9, 20),
+}
+
+# algo_id -> 算法名 (反向映射)
+ID_TO_ALGORITHM: Dict[int, str] = {v[0]: k for k, v in ALGORITHM_REGISTRY.items()}
 
 
 # ==================== Checksum Hook 注册表 ====================
@@ -44,25 +67,103 @@ def get_checksum_hook_by_id(algo_id: int) -> Optional[ChecksumHook]:
     """
     根据 algo_id 获取 ChecksumHook 实例
     
-    支持:
-    - 内置 Hook (algo_id 0-4)
-    - Rclone Hook (algo_id 101-113)
+    优先使用内置 Python 实现，对于内置不支持的算法 (blake3, xxh3 等)
+    会尝试使用外置工具。
     
     Args:
-        algo_id: 算法 ID (来自 FileHeader.checksum_algo)
+        algo_id: 算法 ID
         
     Returns:
         对应的 Hook 实例，未找到返回 None
     """
-    # 1. 先查内置 Hook
+    # 1. 优先使用内置 Hook
     if algo_id in CHECKSUM_REGISTRY:
         return CHECKSUM_REGISTRY[algo_id]()
     
-    # 2. 检查 Rclone 范围 (101-113)
-    from .rclone import RcloneHashHook
-    for name, (aid, _) in RcloneHashHook.ALGORITHMS.items():
-        if aid == algo_id:
-            return RcloneHashHook(name, check_on_init=False)
+    # 2. 对于内置不支持的算法，尝试使用外置工具
+    algorithm = ID_TO_ALGORITHM.get(algo_id)
+    if algorithm:
+        hook = get_external_checksum_hook(algorithm)
+        if hook:
+            return hook
+    
+    return None
+
+
+def get_external_checksum_hook(algorithm: str) -> Optional[ChecksumHook]:
+    """
+    获取外置工具的 ChecksumHook
+    
+    优先使用 fhash，其次是 rclone。
+    
+    Args:
+        algorithm: 算法名 (如 'sha256', 'quickxor')
+        
+    Returns:
+        Hook 实例，工具不可用返回 None
+    """
+    # 尝试 fhash
+    try:
+        from .fhash import FhashHook
+        if algorithm.lower() in FhashHook.SUPPORTED_ALGORITHMS:
+            return FhashHook(algorithm, check_on_init=True)
+    except Exception:
+        pass
+    
+    # 尝试 rclone
+    try:
+        from .rclone import RcloneHashHook
+        if algorithm.lower() in RcloneHashHook.SUPPORTED_ALGORITHMS:
+            return RcloneHashHook(algorithm, check_on_init=True)
+    except Exception:
+        pass
+    
+    return None
+
+
+def get_best_checksum_hook(algorithm: str) -> Optional[ChecksumHook]:
+    """
+    获取指定算法的最佳 Hook 实现
+    
+    优先顺序:
+    1. fhash (如果可用)
+    2. 内置 Python 实现
+    3. rclone (如果可用)
+    
+    对于批量文件处理场景，建议使用此函数获取外置工具实现。
+    
+    Args:
+        algorithm: 算法名
+        
+    Returns:
+        最佳的 Hook 实例，失败返回 None
+    """
+    algorithm = algorithm.lower()
+    
+    if algorithm not in ALGORITHM_REGISTRY:
+        return None
+    
+    algo_id = ALGORITHM_REGISTRY[algorithm][0]
+    
+    # 1. 尝试 fhash (批量处理性能最佳)
+    try:
+        from .fhash import FhashHook
+        if algorithm in FhashHook.SUPPORTED_ALGORITHMS:
+            return FhashHook(algorithm, check_on_init=True)
+    except Exception:
+        pass
+    
+    # 2. 内置实现
+    if algo_id in CHECKSUM_REGISTRY:
+        return CHECKSUM_REGISTRY[algo_id]()
+    
+    # 3. rclone
+    try:
+        from .rclone import RcloneHashHook
+        if algorithm in RcloneHashHook.SUPPORTED_ALGORITHMS:
+            return RcloneHashHook(algorithm, check_on_init=True)
+    except Exception:
+        pass
     
     return None
 

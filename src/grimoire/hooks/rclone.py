@@ -35,21 +35,10 @@ class RcloneHashHook(ChecksumHook):
         hash_bytes = hook.compute_file('/path/to/file')
     """
     
-    # 算法注册表: name -> (algo_id, digest_size)
-    ALGORITHMS = {
-        'md5': (101, 16),
-        'sha1': (102, 20),
-        'sha256': (103, 32),
-        'sha512': (104, 64),
-        'crc32': (105, 4),
-        'blake3': (106, 32),
-        'xxh3': (107, 8),       # xxh3 输出 64 bits
-        'xxh128': (108, 16),    # xxh128 输出 128 bits
-        'quickxor': (109, 20),  # OneDrive QuickXorHash
-        'dropbox': (110, 64),
-        'whirlpool': (111, 64),
-        'hidrive': (112, 20),   # HiDrive 使用 SHA1
-        'mailru': (113, 20),    # Mail.ru 使用 SHA1
+    # rclone 支持的算法列表
+    SUPPORTED_ALGORITHMS = {
+        'md5', 'sha1', 'sha256', 'sha512', 'crc32',
+        'blake3', 'xxh3', 'xxh128', 'quickxor'
     }
     
     def __init__(
@@ -67,15 +56,17 @@ class RcloneHashHook(ChecksumHook):
             check_on_init: 是否在初始化时检查 rclone 可用性
         """
         algorithm = algorithm.lower()
-        if algorithm not in self.ALGORITHMS:
+        if algorithm not in self.SUPPORTED_ALGORITHMS:
             raise ValueError(
                 f"不支持的算法: {algorithm}。"
-                f"支持的算法: {list(self.ALGORITHMS.keys())}"
+                f"支持的算法: {list(self.SUPPORTED_ALGORITHMS)}"
             )
         
+        # 从统一注册表获取 algo_id 和 digest_size
+        from .registry import ALGORITHM_REGISTRY
         self._algorithm = algorithm
         self._rclone_path = rclone_path
-        self._algo_id, self._digest_size = self.ALGORITHMS[algorithm]
+        self._algo_id, self._digest_size = ALGORITHM_REGISTRY[algorithm]
         
         if check_on_init:
             self._check_rclone()
