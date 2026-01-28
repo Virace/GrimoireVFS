@@ -29,23 +29,32 @@ SRC_DIR = PROJECT_ROOT / "src"
 def pytest_configure(config):
     """注册自定义 markers"""
     config.addinivalue_line("markers", "rclone: 需要 rclone 环境的测试")
+    config.addinivalue_line("markers", "fhash: 需要 fhash 环境的测试")
     config.addinivalue_line("markers", "slow: 耗时较长的测试")
 
 
-# ==================== rclone 检测 ====================
+# ==================== 外置工具检测 ====================
 
 RCLONE_AVAILABLE = shutil.which('rclone') is not None
 
+# fhash 检测：先检查环境变量，再检查 PATH
+_fhash_env = os.environ.get('GRIMOIRE_FHASH_PATH')
+FHASH_AVAILABLE = (
+    (_fhash_env and os.path.exists(_fhash_env)) or
+    shutil.which('fhash') is not None
+)
+
 
 def pytest_collection_modifyitems(config, items):
-    """自动跳过需要 rclone 但环境不可用的测试"""
-    if RCLONE_AVAILABLE:
-        return
-    
+    """自动跳过需要外置工具但环境不可用的测试"""
     skip_rclone = pytest.mark.skip(reason="rclone 未安装，跳过相关测试")
+    skip_fhash = pytest.mark.skip(reason="fhash 未安装，跳过相关测试")
+    
     for item in items:
-        if "rclone" in item.keywords:
+        if "rclone" in item.keywords and not RCLONE_AVAILABLE:
             item.add_marker(skip_rclone)
+        if "fhash" in item.keywords and not FHASH_AVAILABLE:
+            item.add_marker(skip_fhash)
 
 
 # ==================== 基础 Fixtures ====================
