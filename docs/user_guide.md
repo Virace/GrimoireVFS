@@ -220,32 +220,51 @@ with ArchiveReader(
 
 ## Hook 系统
 
+### 统一算法 ID
+
+所有校验算法使用统一的 `algo_id`，与实现工具解耦:
+
+| 算法 | algo_id | 输出大小 | 内置 | fhash | rclone |
+|------|---------|---------|------|-------|--------|
+| none | 0 | 0 | ✅ | - | - |
+| crc32 | 1 | 4 | ✅ | ✅ | ✅ |
+| md5 | 2 | 16 | ✅ | ✅ | ✅ |
+| sha1 | 3 | 20 | ✅ | ✅ | ✅ |
+| sha256 | 4 | 32 | ✅ | ✅ | ✅ |
+| sha512 | 5 | 64 | - | ✅ | ✅ |
+| blake3 | 6 | 32 | - | ✅ | ✅ |
+| xxh3 | 7 | 8 | - | ✅ | ✅ |
+| xxh128 | 8 | 16 | - | ✅ | ✅ |
+| quickxor | 9 | 20 | - | ✅ | ✅ |
+
 ### 内置 Hook (纯 Python)
 
-| Hook | 用途 | algo_id | 输出大小 |
-|------|------|---------|---------|
-| `NoneChecksumHook` | 不校验 | 0 | 0 |
-| `CRC32Hook` | CRC32 校验 | 1 | 4 |
-| `MD5Hook` | MD5 校验 | 2 | 16 |
-| `SHA1Hook` | SHA1 校验 | 3 | 20 |
-| `SHA256Hook` | SHA256 校验 | 4 | 32 |
+| Hook | algo_id | 用途 |
+|------|---------|------|
+| `NoneChecksumHook` | 0 | 不校验 |
+| `CRC32Hook` | 1 | CRC32 校验 |
+| `MD5Hook` | 2 | MD5 校验 |
+| `SHA1Hook` | 3 | SHA1 校验 |
+| `SHA256Hook` | 4 | SHA256 校验 |
 
-### RcloneHashHook (推荐)
+### FhashHook ⭐ 推荐
 
-通过调用 [rclone](https://rclone.org/) 计算哈希，性能远超纯 Python 实现。
-
-支持 13 种算法: `md5`, `sha1`, `sha256`, `sha512`, `crc32`, `blake3`, `xxh3`, `xxh128`, `quickxor`, `dropbox`, `whirlpool`, `hidrive`, `mailru`
+通过调用 [fhash](https://github.com/Virace/fast-hasher) 计算哈希，性能远超纯 Python 实现。
 
 ```python
-from grimoire import RcloneHashHook
+from grimoire import FhashHook
 
-# 创建 hook (algo_id 自动分配 101-113)
-hook = RcloneHashHook("quickxor")  # OneDrive 专用，速度最快
-hook = RcloneHashHook("blake3")     # 现代快速哈希
-hook = RcloneHashHook("xxh3")       # 极速非加密哈希
+# 创建 hook
+hook = FhashHook("quickxor")  # OneDrive 专用，速度最快
+hook = FhashHook("blake3")     # 现代快速哈希
+hook = FhashHook("xxh3")       # 极速非加密哈希
 
 # 单文件计算 (推荐)
 hash_bytes = hook.compute_file("/path/to/file")
+
+# 批量文件计算 (性能最佳)
+results = hook.compute_files_batch(["/path/to/file1", "/path/to/file2"])
+# 返回: {"/path/to/file1": b"...", "/path/to/file2": b"..."}
 
 # 批量目录计算
 hash_map = hook.compute_dir("/path/to/dir", recursive=True)
@@ -254,17 +273,70 @@ hash_map = hook.compute_dir("/path/to/dir", recursive=True)
 hash_bytes = hook.compute(data)
 ```
 
-### 高性能批量操作
+### RcloneHashHook (备选)
 
-使用 `add_dir_batch_rclone` 可一次性计算整个目录:
+通过调用 [rclone](https://rclone.org/) 计算哈希，与 FhashHook API 兼容。
 
 ```python
-from grimoire import ManifestBuilder, RcloneHashHook
+from grimoire import RcloneHashHook
 
-builder = ManifestBuilder("game.manifest", checksum_hook=RcloneHashHook("quickxor"))
+hook = RcloneHashHook("sha256")
+hash_bytes = hook.compute_file("/path/to/file")
+```
 
-# ⚡ 1000+ 文件仅需 10 秒 (vs 普通方法 6 分钟)
-result = builder.add_dir_batch_rclone("./assets", "/game")
+### 外置工具发现
+
+外置工具按以下优先级自动发现:
+
+1. **显式路径**: 构造函数的 `fhash_path` / `rclone_path` 参数
+2. **环境变量**: `GRIMOIRE_FHASH_PATH` / `GRIMOIRE_RCLONE_PATH`
+3. **系统 PATH**: 使用 `shutil.which()` 查找
+4. **vendor 目录**: 库安装目录下的 `vendor/bin/`
+5. **用户目录**: `~/.grimoire/bin/`
+
+```python
+from grimoire.hooks import ExternalToolLocator, get_tool_manager
+
+# 手动查找工具
+fhash_path = ExternalToolLocator.find_executable('fhash')
+
+# 获取工具信息
+info = ExternalToolLocator.get_tool_info('fhash')
+print(f"版本: {info.version}, 路径: {info.path}")
+
+# 获取最佳可用校验工具
+manager = get_tool_manager()
+tool = manager.get_best_checksum_tool()  # 优先 fhash，回退 rclone
+```
+
+### 自动选择最佳 Hook
+
+```python
+from grimoire.hooks import get_best_checksum_hook
+
+# 自动选择最佳实现 (优先 fhash > 内置 > rclone)
+hook = get_best_checksum_hook('sha256')
+
+# 对于内置不支持的算法 (如 quickxor)，自动使用外置工具
+hook = get_best_checksum_hook('quickxor')  # 返回 FhashHook
+```
+
+### 高性能批量操作
+
+使用 FhashHook 批量处理:
+
+```python
+from grimoire import ManifestBuilder, FhashHook
+
+hook = FhashHook("quickxor")
+builder = ManifestBuilder("game.manifest", checksum_hook=hook)
+
+# 添加目录
+builder.add_dir("./assets", "/game")
+builder.build()
+
+# 或使用 FhashHook 批量计算后手动添加
+results = hook.compute_files_batch(["./assets/file1.png", "./assets/file2.png"])
 ```
 
 ### 索引压缩 Hook

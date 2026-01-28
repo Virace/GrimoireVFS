@@ -10,7 +10,7 @@
 
 - **零依赖**: 仅使用 Python 标准库 (3.7+)
 - **双模式**: Manifest (清单校验) / Archive (资源打包)
-- **高性能**: mmap 读取、批量操作、rclone 加速
+- **高性能**: mmap 读取、批量操作、fhash/rclone 加速
 - **安全**: 索引加密、路径 Hash、校验算法可配置
 
 ## 📦 安装
@@ -29,30 +29,30 @@ pip install .
 
 ## 🚀 快速开始
 
-### Manifest 模式 (清单校验) - 推荐使用 rclone
+### Manifest 模式 (清单校验) - 推荐使用 fhash
 
 ```python
-from grimoire import ManifestBuilder, ManifestReader, RcloneHashHook
+from grimoire import ManifestBuilder, ManifestReader, FhashHook
 from grimoire.hooks import ZlibCompressHook
 
-# 创建清单 (使用 rclone quickxor，性能最优)
+# 创建清单 (使用 fhash quickxor，性能最优)
 builder = ManifestBuilder(
     "game.manifest",
-    checksum_hook=RcloneHashHook("quickxor"),  # 或 sha256, md5, blake3...
+    checksum_hook=FhashHook("quickxor"),  # 或 sha256, md5, blake3...
     index_crypto=ZlibCompressHook()  # 压缩索引区
 )
 
-# 批量添加 (使用 rclone 批量计算，1000+ 文件仅需 10 秒)
-result = builder.add_dir_batch_rclone("./assets", "game/assets")
-print(f"成功: {result.success_count}, 耗时: {result.elapsed_time:.1f}s")
+# 添加文件
+builder.add_dir("./assets", "/game/assets")
 builder.build()
 
 # 校验文件
 with ManifestReader("game.manifest", 
-    checksum_hook=RcloneHashHook("quickxor"),
+    checksum_hook=FhashHook("quickxor"),
     index_crypto=ZlibCompressHook()
 ) as reader:
-    is_valid = reader.verify_file("game/assets/hero.png", "./assets/hero.png")
+    is_valid = reader.verify_file("/game/assets/hero.png", "./assets/hero.png")
+```
 
 ### Archive 模式 (资源打包)
 
@@ -82,7 +82,7 @@ with ArchiveReader("game.pak", compression_hooks=[ZlibHook()]) as reader:
 ```python
 from grimoire import ManifestJsonConverter, ModeConverter
 
-# Manifest 转 JSON (支持 rclone hook)
+# Manifest 转 JSON
 ManifestJsonConverter.manifest_to_json("game.manifest", "game.json")
 
 # JSON 转 Manifest
@@ -96,28 +96,55 @@ ModeConverter.archive_to_manifest("game.pak", "game.manifest")
 
 ### 内置 (纯 Python)
 
-| Hook | 输出大小 | 说明 |
-|------|---------|------|
-| `CRC32Hook` | 4 bytes | 快速校验 |
-| `MD5Hook` | 16 bytes | 通用校验 |
-| `SHA1Hook` | 20 bytes | Git 使用 |
-| `SHA256Hook` | 32 bytes | 强校验 |
+| Hook | algo_id | 输出大小 | 说明 |
+|------|---------|---------|------|
+| `NoneChecksumHook` | 0 | 0 | 不校验 |
+| `CRC32Hook` | 1 | 4 bytes | 快速校验 |
+| `MD5Hook` | 2 | 16 bytes | 通用校验 |
+| `SHA1Hook` | 3 | 20 bytes | Git 使用 |
+| `SHA256Hook` | 4 | 32 bytes | 强校验 |
 
-### RcloneHashHook (推荐，需安装 [rclone](https://rclone.org/))
+### FhashHook ⭐ 推荐 (需安装 [fhash](https://github.com/Virace/fast-hasher))
 
-| 算法 | 输出大小 | 说明 |
-|------|---------|------|
-| `quickxor` | 20 bytes | OneDrive，速度最快 |
-| `md5` / `sha256` | 16/32 bytes | 标准算法 |
-| `blake3` | 32 bytes | 现代快速哈希 |
-| `xxh3` / `xxh128` | 8/16 bytes | 极速非加密哈希 |
+高性能外置工具，支持批量文件处理和多种算法。
+
+| 算法 | algo_id | 输出大小 | 说明 |
+|------|---------|---------|------|
+| `quickxor` | 9 | 20 bytes | OneDrive，速度最快 |
+| `blake3` | 6 | 32 bytes | 现代快速哈希 |
+| `xxh3` / `xxh128` | 7/8 | 8/16 bytes | 极速非加密哈希 |
+| `md5` / `sha256` | 2/4 | 16/32 bytes | 标准算法 |
+
+```python
+from grimoire import FhashHook
+
+# 创建 hook
+hook = FhashHook("quickxor")
+
+# 单文件计算
+hash_bytes = hook.compute_file("/path/to/file")
+
+# 批量计算 (性能最佳)
+results = hook.compute_files_batch(["/path/to/file1", "/path/to/file2"])
+```
+
+### RcloneHashHook (备选，需安装 [rclone](https://rclone.org/))
 
 ```python
 from grimoire import RcloneHashHook
 
-# 支持 13 种算法
-hook = RcloneHashHook("quickxor")  # 或 md5, sha256, blake3, xxh3...
+# 与 FhashHook 兼容的 API
+hook = RcloneHashHook("sha256")
 ```
+
+### 外置工具发现
+
+外置工具按以下优先级自动发现:
+
+1. 环境变量 (`GRIMOIRE_FHASH_PATH`, `GRIMOIRE_RCLONE_PATH`)
+2. 系统 PATH
+3. 库 `vendor/bin/` 目录
+4. 用户目录 `~/.grimoire/bin/`
 
 ## 📖 文档
 
