@@ -17,9 +17,15 @@ from grimoire import (
     ManifestJsonConverter, ModeConverter,
     MD5Hook,
 )
+from grimoire.converter import merge_manifests, MergeResult
 from grimoire.hooks.checksum import SHA256Hook, CRC32Hook
 from grimoire.hooks.crypto import ZlibCompressHook, XorObfuscateHook
 from grimoire.hooks.base import CompressionHook
+from grimoire.exceptions import (
+    ManifestVersionMismatchError,
+    ManifestAlgorithmMismatchError,
+    PathConflictError,
+)
 
 
 # ==================== 测试用压缩 Hook ====================
@@ -437,3 +443,259 @@ class TestFullConversionChain:
                     data1 = reader1.read(f"/data/{name}")
                     data2 = reader2.read(f"/data/{name}")
                     assert data1 == data2 == expected
+
+
+# ==================== 清单合并测试 ====================
+
+
+class TestMergeManifests:
+    """清单合并测试"""
+    
+    def test_merge_two_json_manifests(self, tmp_path, sample_files):
+        """合并两个 JSON 清单"""
+        src_dir, files = sample_files
+        
+        # 创建两个 JSON 清单
+        json1_path = tmp_path / "manifest1.json"
+        json2_path = tmp_path / "manifest2.json"
+        merged_path = tmp_path / "merged.json"
+        
+        files_list = list(files.keys())
+        half = len(files_list) // 2
+        
+        # 第一个清单包含前半部分文件
+        entries1 = [{"path": f"part1/{name}", "size": len(files[name])} for name in files_list[:half]]
+        with open(json1_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "version": 2,
+                "checksum_algo": 2,
+                "index_flags": 0,
+                "entries": entries1
+            }, f)
+        
+        # 第二个清单包含后半部分文件
+        entries2 = [{"path": f"part2/{name}", "size": len(files[name])} for name in files_list[half:]]
+        with open(json2_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "version": 2,
+                "checksum_algo": 2,
+                "index_flags": 0,
+                "entries": entries2
+            }, f)
+        
+        # 合并
+        result = merge_manifests(
+            [str(json1_path), str(json2_path)],
+            str(merged_path),
+            output_format="json"
+        )
+        
+        assert result.source_count == 2
+        assert result.total_entries == len(files)
+        assert result.duplicate_count == 0
+        
+        # 验证合并结果
+        with open(merged_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        assert data["entry_count"] == len(files)
+        assert len(data["entries"]) == len(files)
+    
+    def test_merge_json_and_binary(self, tmp_path, sample_files):
+        """合并 JSON 和二进制清单"""
+        src_dir, files = sample_files
+        
+        files_list = list(files.keys())
+        half = len(files_list) // 2
+        
+        # 创建二进制清单 (前半部分)
+        binary_path = tmp_path / "manifest.grim"
+        builder = ManifestBuilder(str(binary_path), checksum_hook=MD5Hook())
+        for name in files_list[:half]:
+            builder.add_file(str(src_dir / name), f"/binary/{name}")
+        builder.build()
+        
+        # 创建 JSON 清单 (后半部分)
+        json_path = tmp_path / "manifest.json"
+        entries = [{"path": f"json/{name}", "size": len(files[name])} for name in files_list[half:]]
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "version": 2,
+                "checksum_algo": 2,  # MD5
+                "index_flags": 0,
+                "entries": entries
+            }, f)
+        
+        # 合并
+        merged_path = tmp_path / "merged.json"
+        result = merge_manifests(
+            [str(binary_path), str(json_path)],
+            str(merged_path),
+            output_format="json"
+        )
+        
+        assert result.source_count == 2
+        assert result.total_entries == len(files)
+    
+    def test_merge_conflict_error(self, tmp_path):
+        """路径冲突应抛出异常 (on_conflict='error')"""
+        json1_path = tmp_path / "m1.json"
+        json2_path = tmp_path / "m2.json"
+        
+        # 两个清单包含相同路径
+        for path in [json1_path, json2_path]:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "version": 2,
+                    "checksum_algo": 0,
+                    "entries": [{"path": "shared/file.txt"}]
+                }, f)
+        
+        with pytest.raises(PathConflictError) as exc_info:
+            merge_manifests(
+                [str(json1_path), str(json2_path)],
+                str(tmp_path / "merged.json"),
+                on_conflict="error"
+            )
+        
+        assert "shared/file.txt" in str(exc_info.value)
+    
+    def test_merge_conflict_keep_first(self, tmp_path):
+        """路径冲突保留第一个 (on_conflict='keep_first')"""
+        json1_path = tmp_path / "m1.json"
+        json2_path = tmp_path / "m2.json"
+        merged_path = tmp_path / "merged.json"
+        
+        with open(json1_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "version": 2,
+                "checksum_algo": 0,
+                "entries": [{"path": "shared/file.txt", "size": 100}]
+            }, f)
+        
+        with open(json2_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "version": 2,
+                "checksum_algo": 0,
+                "entries": [{"path": "shared/file.txt", "size": 200}]
+            }, f)
+        
+        result = merge_manifests(
+            [str(json1_path), str(json2_path)],
+            str(merged_path),
+            on_conflict="keep_first"
+        )
+        
+        assert result.duplicate_count == 1
+        assert result.total_entries == 1
+        
+        with open(merged_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # 应保留第一个 (size=100)
+        assert data["entries"][0]["size"] == 100
+    
+    def test_merge_conflict_keep_last(self, tmp_path):
+        """路径冲突保留最后一个 (on_conflict='keep_last')"""
+        json1_path = tmp_path / "m1.json"
+        json2_path = tmp_path / "m2.json"
+        merged_path = tmp_path / "merged.json"
+        
+        with open(json1_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "version": 2,
+                "checksum_algo": 0,
+                "entries": [{"path": "shared/file.txt", "size": 100}]
+            }, f)
+        
+        with open(json2_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "version": 2,
+                "checksum_algo": 0,
+                "entries": [{"path": "shared/file.txt", "size": 200}]
+            }, f)
+        
+        result = merge_manifests(
+            [str(json1_path), str(json2_path)],
+            str(merged_path),
+            on_conflict="keep_last"
+        )
+        
+        assert result.duplicate_count == 1
+        
+        with open(merged_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # 应保留最后一个 (size=200)
+        assert data["entries"][0]["size"] == 200
+    
+    def test_merge_version_mismatch_error(self, tmp_path):
+        """版本不匹配应抛出异常"""
+        json1_path = tmp_path / "v2.json"
+        json2_path = tmp_path / "v3.json"
+        
+        with open(json1_path, 'w', encoding='utf-8') as f:
+            json.dump({"version": 2, "checksum_algo": 0, "entries": []}, f)
+        
+        with open(json2_path, 'w', encoding='utf-8') as f:
+            json.dump({"version": 3, "checksum_algo": 0, "entries": []}, f)
+        
+        with pytest.raises(ManifestVersionMismatchError):
+            merge_manifests(
+                [str(json1_path), str(json2_path)],
+                str(tmp_path / "merged.json")
+            )
+    
+    def test_merge_algorithm_mismatch_error(self, tmp_path):
+        """算法不匹配应抛出异常"""
+        json1_path = tmp_path / "md5.json"
+        json2_path = tmp_path / "sha256.json"
+        
+        with open(json1_path, 'w', encoding='utf-8') as f:
+            json.dump({"version": 2, "checksum_algo": 2, "entries": []}, f)  # MD5
+        
+        with open(json2_path, 'w', encoding='utf-8') as f:
+            json.dump({"version": 2, "checksum_algo": 4, "entries": []}, f)  # SHA256
+        
+        with pytest.raises(ManifestAlgorithmMismatchError):
+            merge_manifests(
+                [str(json1_path), str(json2_path)],
+                str(tmp_path / "merged.json")
+            )
+    
+    def test_merge_output_json(self, tmp_path):
+        """输出为 JSON 格式"""
+        json_path = tmp_path / "source.json"
+        merged_path = tmp_path / "merged.json"
+        
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "version": 2,
+                "magic": "TEST",
+                "checksum_algo": 0,
+                "entries": [{"path": "test.txt"}]
+            }, f)
+        
+        result = merge_manifests(
+            [str(json_path)],
+            str(merged_path),
+            output_format="json"
+        )
+        
+        assert result.total_entries == 1
+        assert merged_path.exists()
+        
+        with open(merged_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        assert data["magic"] == "TEST"
+    
+    def test_merge_empty_sources(self, tmp_path):
+        """空源列表应返回空结果"""
+        result = merge_manifests(
+            [],
+            str(tmp_path / "merged.json")
+        )
+        
+        assert result.total_entries == 0
+        assert result.source_count == 0

@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Virace/GrimoireVFS/blob/main/docs/schema/manifest.v2.schema.json",
+  "title": "GrimoireVFS Manifest Schema v2",
+  "description": "标准化的清单 JSON 格式，支持人工编写和合并操作",
+  "type": "object",
+  "required": ["version", "checksum_algo", "entries"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 2,
+      "description": "Schema 版本号，当前固定为 2"
+    },
+    "magic": {
+      "type": "string",
+      "maxLength": 4,
+      "default": "GRIM",
+      "description": "魔法数标识符 (可选，默认 GRIM)"
+    },
+    "checksum_algo": {
+      "type": "integer",
+      "description": "校验算法 ID (0=无, 1=CRC32, 2=MD5, 3=SHA1, 4=SHA256, 5=SHA512, 6=BLAKE3, 7=XXH3, 8=XXH128, 9=QuickXorHash)"
+    },
+    "checksum_algo_name": {
+      "type": "string",
+      "description": "校验算法可读名称 (可选，仅用于显示)"
+    },
+    "index_flags": {
+      "type": "integer",
+      "default": 0,
+      "description": "索引区标志位 (0=无, 1=加密, 2=压缩, 3=加密+压缩)"
+    },
+    "index_flags_name": {
+      "type": "string",
+      "description": "索引标志可读名称 (可选，仅用于显示)"
+    },
+    "entry_count": {
+      "type": "integer",
+      "description": "条目总数 (可选，转换时自动计算)"
+    },
+    "entries": {
+      "type": "array",
+      "description": "文件条目列表",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "VFS 虚拟路径 (必填)"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "文件大小 (可选，转换时自动读取)"
+          },
+          "checksum": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]*$",
+            "description": "十六进制校验值 (可选，转换时自动计算)"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

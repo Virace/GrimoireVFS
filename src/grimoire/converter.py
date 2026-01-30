@@ -8,7 +8,9 @@
 
 import json
 import os
-from typing import Optional, Dict, List, Callable, Any
+import time
+from dataclasses import dataclass, field
+from typing import Optional, Dict, List, Callable, Any, Tuple
 
 from .manifest import ManifestBuilder, ManifestReader
 from .archive import ArchiveBuilder, ArchiveReader
@@ -19,6 +21,24 @@ from .hooks.registry import (
     get_hook_name,
 )
 from .utils import normalize_path
+from .exceptions import (
+    ManifestMergeError,
+    ManifestVersionMismatchError,
+    ManifestAlgorithmMismatchError,
+    PathConflictError,
+)
+
+
+# ==================== 合并结果数据类 ====================
+
+
+@dataclass
+class MergeResult:
+    """清单合并操作结果"""
+    total_entries: int = 0      # 合并后的总条目数
+    source_count: int = 0       # 源清单数量
+    duplicate_count: int = 0    # 重复条目数 (被去重/覆盖)
+    elapsed_time: float = 0.0   # 耗时 (秒)
 
 
 class ManifestJsonConverter:
@@ -372,3 +392,308 @@ class ModeConverter:
         
         builder.build()
         return result
+
+
+# ==================== 清单合并功能 ====================
+
+
+def _load_manifest_as_dict(source_path: str) -> dict:
+    """
+    加载清单文件为标准字典格式
+    
+    自动检测文件格式 (JSON 或 二进制)。
+    
+    Args:
+        source_path: 清单文件路径
+        
+    Returns:
+        标准化的 JSON 字典
+    """
+    ext = os.path.splitext(source_path)[1].lower()
+    
+    if ext == '.json':
+        # 直接读取 JSON
+        with open(source_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    else:
+        # 二进制格式，先读取文件头
+        from .core.schema import FileHeader
+        
+        with open(source_path, 'rb') as f:
+            header = FileHeader.unpack(f.read(FileHeader.SIZE))
+        
+        algo_id = header.checksum_algo
+        flags = header.flags
+        
+        checksum_hook = get_checksum_hook_by_id(algo_id)
+        index_crypto = get_index_crypto_by_flags(flags)
+        
+        with ManifestReader(
+            source_path,
+            checksum_hook=checksum_hook,
+            index_crypto=index_crypto
+        ) as reader:
+            entries = []
+            for path in reader.list_all():
+                entry = reader.get_entry(path)
+                entries.append({
+                    'path': path,
+                    'size': entry.raw_size,
+                    'checksum': entry.checksum.hex() if entry.checksum else None
+                })
+            
+            return {
+                'version': 2,
+                'magic': reader.file_header.magic.decode('ascii', errors='ignore').rstrip('\x00'),
+                'checksum_algo': algo_id,
+                'checksum_algo_name': get_hook_name(checksum_hook),
+                'index_flags': flags,
+                'index_flags_name': get_hook_name(index_crypto),
+                'entry_count': len(entries),
+                'entries': entries
+            }
+
+
+def merge_manifests(
+    sources: List[str],
+    output_path: str,
+    local_base_path: Optional[str] = None,
+    path_mappings: Optional[Dict[str, str]] = None,
+    on_conflict: str = "error",
+    output_format: str = "auto",
+) -> MergeResult:
+    """
+    合并多个清单文件
+    
+    支持 JSON 和二进制清单的混合输入。
+    约束: 所有输入必须具有相同的 version、checksum_algo 和 index_flags。
+    
+    Args:
+        sources: 清单文件路径列表 (支持 .json 和 .grim 混合)
+        output_path: 输出文件路径
+        local_base_path: 本地文件基础路径 (输出为二进制时必需)
+        path_mappings: 虚拟路径映射 {虚拟前缀: 本地前缀}
+        on_conflict: 路径冲突处理策略:
+            - "error": 抛出 PathConflictError (默认)
+            - "keep_first": 保留第一个出现的条目
+            - "keep_last": 保留最后一个出现的条目
+        output_format: 输出格式:
+            - "auto": 根据扩展名自动判断
+            - "json": 输出 JSON 格式
+            - "binary": 输出二进制格式
+        
+    Returns:
+        MergeResult 合并结果
+        
+    Raises:
+        ManifestVersionMismatchError: 版本不匹配
+        ManifestAlgorithmMismatchError: 校验算法不匹配
+        PathConflictError: 路径冲突 (on_conflict='error' 时)
+    """
+    if not sources:
+        return MergeResult()
+    
+    start_time = time.time()
+    
+    # 1. 加载所有源清单
+    manifests = [_load_manifest_as_dict(src) for src in sources]
+    
+    # 2. 验证兼容性
+    versions = [m.get('version', 2) for m in manifests]
+    if len(set(versions)) > 1:
+        raise ManifestVersionMismatchError(versions)
+    
+    algos = [m.get('checksum_algo', 0) for m in manifests]
+    if len(set(algos)) > 1:
+        raise ManifestAlgorithmMismatchError(algos)
+    
+    flags_list = [m.get('index_flags', 0) for m in manifests]
+    if len(set(flags_list)) > 1:
+        raise ManifestAlgorithmMismatchError(flags_list)  # 复用异常
+    
+    # 3. 合并 entries
+    merged_entries: Dict[str, Tuple[int, dict]] = {}  # path -> (source_index, entry)
+    duplicate_count = 0
+    
+    for src_idx, manifest in enumerate(manifests):
+        for entry in manifest.get('entries', []):
+            path = normalize_path(entry['path'])
+            
+            if path in merged_entries:
+                duplicate_count += 1
+                existing_idx = merged_entries[path][0]
+                
+                if on_conflict == "error":
+                    raise PathConflictError(path, [existing_idx, src_idx])
+                elif on_conflict == "keep_first":
+                    continue  # 保留已有的
+                elif on_conflict == "keep_last":
+                    merged_entries[path] = (src_idx, entry)
+            else:
+                merged_entries[path] = (src_idx, entry)
+    
+    # 4. 构建输出数据
+    base_manifest = manifests[0]
+    output_entries = [
+        {
+            'path': path,
+            'size': entry.get('size'),
+            'checksum': entry.get('checksum')
+        }
+        for path, (_, entry) in merged_entries.items()
+    ]
+    
+    merged_data = {
+        'version': base_manifest.get('version', 2),
+        'magic': base_manifest.get('magic', 'GRIM'),
+        'checksum_algo': base_manifest.get('checksum_algo', 0),
+        'checksum_algo_name': base_manifest.get('checksum_algo_name'),
+        'index_flags': base_manifest.get('index_flags', 0),
+        'index_flags_name': base_manifest.get('index_flags_name'),
+        'entry_count': len(output_entries),
+        'entries': output_entries
+    }
+    
+    # 5. 确定输出格式
+    if output_format == "auto":
+        ext = os.path.splitext(output_path)[1].lower()
+        output_format = "json" if ext == '.json' else "binary"
+    
+    # 6. 写入输出
+    if output_format == "json":
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(merged_data, f, ensure_ascii=False, indent=2)
+    else:
+        # 输出二进制，需要重新构建
+        if local_base_path is None:
+            raise ValueError("输出二进制格式时必须提供 local_base_path")
+        
+        ManifestJsonConverter.json_to_manifest(
+            json_path=output_path.replace('.grim', '.tmp.json') if not output_path.endswith('.json') else output_path,
+            output_path=output_path if not output_path.endswith('.json') else output_path.replace('.json', '.grim'),
+            local_base_path=local_base_path,
+            path_mappings=path_mappings
+        )
+        # 临时 JSON 处理 - 直接写入再转换
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as tmp:
+            json.dump(merged_data, tmp, ensure_ascii=False)
+            tmp_path = tmp.name
+        
+        try:
+            ManifestJsonConverter.json_to_manifest(
+                json_path=tmp_path,
+                output_path=output_path,
+                local_base_path=local_base_path,
+                path_mappings=path_mappings
+            )
+        finally:
+            os.unlink(tmp_path)
+    
+    elapsed = time.time() - start_time
+    
+    return MergeResult(
+        total_entries=len(output_entries),
+        source_count=len(sources),
+        duplicate_count=duplicate_count,
+        elapsed_time=elapsed
+    )
+
+
+# ==================== 版本迁移预留框架 ====================
+
+
+class ManifestVersionMigrator:
+    """
+    清单版本迁移器 (预留框架)
+    
+    当库版本升级导致 Schema 变化时，使用此类进行版本迁移。
+    
+    工作流程:
+    1. 使用旧版本库将二进制转为 JSON
+    2. 使用此迁移器将 JSON 升级到新版本
+    3. 使用新版本库将 JSON 转回二进制
+    
+    TODO: 当 Schema 版本升级时，在此实现具体迁移逻辑。
+    """
+    
+    # 当前支持的 Schema 版本
+    CURRENT_VERSION = 2
+    SUPPORTED_VERSIONS = [2]
+    
+    @classmethod
+    def migrate_json(
+        cls,
+        source_path: str,
+        target_version: int = 2
+    ) -> dict:
+        """
+        将旧版本 JSON 迁移到目标版本
+        
+        TODO: 实现具体版本迁移逻辑。
+        目前仅支持版本 2，直接返回原数据。
+        
+        Args:
+            source_path: 源 JSON 文件路径
+            target_version: 目标版本号
+            
+        Returns:
+            迁移后的 JSON 字典
+            
+        Raises:
+            ValueError: 不支持的目标版本
+        """
+        if target_version not in cls.SUPPORTED_VERSIONS:
+            raise ValueError(f"不支持的目标版本: {target_version}")
+        
+        with open(source_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        source_version = data.get('version', 1)
+        
+        # TODO: 实现版本迁移链
+        # 例如: v1 -> v2 -> v3
+        # if source_version == 1 and target_version >= 2:
+        #     data = cls._migrate_v1_to_v2(data)
+        # if source_version <= 2 and target_version >= 3:
+        #     data = cls._migrate_v2_to_v3(data)
+        
+        if source_version == target_version:
+            return data
+        
+        # 当前仅支持版本 2，无需迁移
+        data['version'] = target_version
+        return data
+    
+    @classmethod
+    def get_supported_versions(cls) -> List[int]:
+        """获取支持的版本列表"""
+        return cls.SUPPORTED_VERSIONS.copy()
+    
+    @classmethod
+    def can_migrate(cls, source_version: int, target_version: int) -> bool:
+        """
+        检查是否支持指定的版本迁移
+        
+        TODO: 随着版本增加，更新此逻辑。
+        """
+        return (
+            source_version in cls.SUPPORTED_VERSIONS and
+            target_version in cls.SUPPORTED_VERSIONS
+        )
+    
+    # ==================== 版本迁移实现 (预留) ====================
+    
+    # @classmethod
+    # def _migrate_v1_to_v2(cls, data: dict) -> dict:
+    #     """
+    #     v1 -> v2 迁移
+    #     
+    #     TODO: 实现具体迁移逻辑
+    #     示例变更:
+    #     - 添加 checksum_algo_name 字段
+    #     - 重命名某些字段
+    #     """
+    #     # data['checksum_algo_name'] = ...
+    #     # data['version'] = 2
+    #     return data

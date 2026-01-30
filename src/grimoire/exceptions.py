@@ -98,3 +98,51 @@ class IndexNotDecryptedError(GrimoireError):
         super().__init__(
             message or "索引区已加密，需要提供 IndexCryptoHook 才能遍历文件列表"
         )
+
+
+# ==================== 清单合并相关异常 ====================
+
+
+class ManifestMergeError(GrimoireError):
+    """清单合并错误基类"""
+    pass
+
+
+class ManifestVersionMismatchError(ManifestMergeError):
+    """
+    清单版本不匹配异常
+    
+    当尝试合并不同版本的清单文件时抛出。
+    """
+    def __init__(self, versions: List[int]):
+        self.versions = versions
+        super().__init__(
+            f"清单版本不匹配，无法合并: {versions}"
+        )
+
+
+class ManifestAlgorithmMismatchError(ManifestMergeError):
+    """
+    校验算法不匹配异常
+    
+    当尝试合并使用不同校验算法的清单文件时抛出。
+    """
+    def __init__(self, algorithms: List[int]):
+        self.algorithms = algorithms
+        super().__init__(
+            f"校验算法不匹配，无法合并: {algorithms}"
+        )
+
+
+class PathConflictError(ManifestMergeError):
+    """
+    路径冲突异常
+    
+    当合并时遇到相同路径但策略为 'error' 时抛出。
+    """
+    def __init__(self, path: str, source_indices: List[int]):
+        self.path = path
+        self.source_indices = source_indices
+        super().__init__(
+            f"路径冲突: '{path}' 在多个源清单中存在 (索引: {source_indices})"
+        )
