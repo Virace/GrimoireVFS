@@ -9,9 +9,10 @@
 5. [Archive 模式](#archive-模式)
 6. [Hook 系统](#hook-系统)
 7. [批量操作](#批量操作)
-8. [高级用法](#高级用法)
-9. [API 参考](#api-参考)
-10. [常见问题](#常见问题)
+8. [格式转换与合并](#格式转换与合并)
+9. [高级用法](#高级用法)
+10. [API 参考](#api-参考)
+11. [常见问题](#常见问题)
 
 ---
 
@@ -443,6 +444,104 @@ with ArchiveReader("game.pak") as reader:
     
     print(f"解包完成: {result.success_count} 个文件")
 ```
+
+---
+
+## 格式转换与合并
+
+### Manifest ↔ JSON 转换
+
+```python
+from grimoire import ManifestJsonConverter
+
+# Manifest 转 JSON (自动检测算法)
+ManifestJsonConverter.manifest_to_json("game.manifest", "game.json")
+
+# JSON 转 Manifest
+ManifestJsonConverter.json_to_manifest(
+    "game.json",
+    "new.manifest",
+    local_base_path="./local",
+    path_mappings={"assets": "./assets_dir"}  # 虚拟路径 -> 本地路径
+)
+```
+
+### Archive ↔ Manifest 转换
+
+```python
+from grimoire import ModeConverter
+
+# Archive 转 Manifest (仅保留元信息)
+ModeConverter.archive_to_manifest(
+    "game.pak",
+    "game.manifest",
+    compression_hooks=[ZlibHook()],
+    checksum_hook=MD5Hook()
+)
+
+# Manifest 转 Archive (需要本地文件)
+ModeConverter.manifest_to_archive(
+    "game.manifest",
+    "game.pak",
+    local_base_path="./local",
+    compression_hooks=[ZlibHook()]
+)
+```
+
+### 清单合并
+
+支持将多个 JSON 或二进制清单合并为一个。
+
+```python
+from grimoire.converter import merge_manifests
+
+# 合并两个 JSON 清单
+result = merge_manifests(
+    ["manifest_a.json", "manifest_b.json"],
+    "merged.json",
+    output_format="json"
+)
+
+# 混合合并 (JSON + 二进制)
+result = merge_manifests(
+    ["base.grim", "update.json"],
+    "combined.json"
+)
+
+print(f"合并 {result.source_count} 个清单")
+print(f"总条目: {result.total_entries}")
+print(f"重复条目: {result.duplicate_count}")
+```
+
+**约束**: 所有清单必须使用相同的 `version`、`checksum_algo` 和 `index_flags`。
+
+**冲突处理策略**:
+
+| 策略 | 说明 |
+|------|------|
+| `error` (默认) | 路径冲突时抛出 `PathConflictError` |
+| `keep_first` | 保留第一个出现的条目 |
+| `keep_last` | 保留最后一个出现的条目 |
+
+### JSON Schema
+
+清单 JSON 格式遵循 [manifest.v2.schema.json](schema/manifest.v2.schema.json)，关键字段:
+
+```json
+{
+  "version": 2,
+  "magic": "GRIM",
+  "checksum_algo": 2,
+  "checksum_algo_name": "md5",
+  "index_flags": 0,
+  "entry_count": 100,
+  "entries": [
+    {"path": "assets/hero.png", "size": 1024, "checksum": "d41d8cd98f00b204e9800998ecf8427e"}
+  ]
+}
+```
+
+手写 JSON 时，只需提供 `path` 字段，`size` 和 `checksum` 会在转换时自动计算。
 
 ---
 

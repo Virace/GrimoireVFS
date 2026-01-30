@@ -94,6 +94,21 @@ ManifestJsonConverter.json_to_manifest("game.json", "new.manifest", "./local")
 ModeConverter.archive_to_manifest("game.pak", "game.manifest")
 ```
 
+### 清单合并
+
+```python
+from grimoire.converter import merge_manifests
+
+# 合并多个清单 (支持 JSON/二进制混合)
+result = merge_manifests(
+    ["manifest_a.json", "manifest_b.grim"],
+    "merged.json",
+    on_conflict="keep_last"  # error/keep_first/keep_last
+)
+print(f"合并 {result.source_count} 个清单，共 {result.total_entries} 条目")
+```
+
+
 ## 🔧 校验算法
 
 ### 内置 (纯 Python)
