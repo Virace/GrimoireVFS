@@ -600,6 +600,49 @@ def merge_manifests(
     )
 
 
+def patch_manifest(
+    base_path: str,
+    patch_path: str,
+    output_path: str,
+    local_base_path: Optional[str] = None,
+    path_mappings: Optional[Dict[str, str]] = None,
+    output_format: str = "auto",
+) -> MergeResult:
+    """
+    用 patch 清单覆盖 base 清单 (热更新场景)
+    
+    这是 merge_manifests 的便捷封装，使用 on_conflict="keep_last" 策略。
+    适用于版本更新场景：用新版本的部分文件清单覆盖旧版本的完整清单。
+    
+    示例:
+        # 1.0.0 完整清单 + 1.0.1 更新清单 → 1.0.1 完整清单
+        result = patch_manifest(
+            "v1.0.0_full.json",
+            "v1.0.1_update.json",
+            "v1.0.1_full.json"
+        )
+    
+    Args:
+        base_path: 基础清单文件路径 (旧版本/完整版)
+        patch_path: 补丁清单文件路径 (新版本/增量)
+        output_path: 输出文件路径
+        local_base_path: 本地文件基础路径 (输出为二进制时必需)
+        path_mappings: 虚拟路径映射
+        output_format: 输出格式 ("auto"/"json"/"binary")
+        
+    Returns:
+        MergeResult 合并结果
+    """
+    return merge_manifests(
+        sources=[base_path, patch_path],
+        output_path=output_path,
+        local_base_path=local_base_path,
+        path_mappings=path_mappings,
+        on_conflict="keep_last",
+        output_format=output_format,
+    )
+
+
 # ==================== 版本迁移预留框架 ====================
 
 
