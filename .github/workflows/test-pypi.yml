@@ -45,9 +45,8 @@ jobs:
       - name: 安装 fhash
         run: |
           FHASH_VERSION=$(curl -s https://api.github.com/repos/Virace/fast-hasher/releases/latest | grep -oP '"tag_name": "\K[^"]+')
-          curl -L "https://github.com/Virace/fast-hasher/releases/download/${FHASH_VERSION}/fhash-linux-amd64.tar.gz" -o fhash.tar.gz
-          tar -xzf fhash.tar.gz
-          sudo mv fhash-linux-amd64 /usr/local/bin/fhash
+          echo "安装 fhash ${FHASH_VERSION}"
+          sudo curl -L "https://github.com/Virace/fast-hasher/releases/download/${FHASH_VERSION}/fhash-linux-amd64" -o /usr/local/bin/fhash
           sudo chmod +x /usr/local/bin/fhash
           fhash -v
 

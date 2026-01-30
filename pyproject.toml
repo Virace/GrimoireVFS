@@ -1,6 +1,6 @@
 [project]
 name = "grimoirevfs"
-version = "0.2.0"
+version = "0.3.0"
 description = "轻量级零依赖 Python 二进制资源管理库，支持 Manifest 清单校验和 Archive 资源打包。"
 readme = "README.md"
 license = {text = "MIT"}
