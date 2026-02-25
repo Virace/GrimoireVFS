@@ -435,7 +435,7 @@ wheels = [
 
 [[package]]
 name = "grimoirevfs"
-version = "0.3.1"
+version = "0.3.2.dev1"
 source = { editable = "." }
 
 [package.dev-dependencies]
