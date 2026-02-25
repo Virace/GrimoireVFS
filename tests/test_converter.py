@@ -212,6 +212,173 @@ class TestManifestJsonRoundtrip:
                 assert paths1 == paths2
 
 
+# ==================== json_to_manifest_trusted 测试 ====================
+
+
+class TestJsonToManifestTrusted:
+    """ManifestJsonConverter.json_to_manifest_trusted 测试
+
+    该方法完全信任 JSON 内的 checksum/size，不读取本地文件。
+    """
+
+    def _make_json(self, path, entries, checksum_algo=2, index_flags=0, magic="GRIM"):
+        """辅助方法：写入 JSON 文件"""
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "version": 2,
+                "magic": magic,
+                "checksum_algo": checksum_algo,
+                "index_flags": index_flags,
+                "entries": entries,
+            }, f)
+
+    def test_basic_conversion_produces_valid_manifest(self, tmp_path):
+        """基础转换：JSON → 二进制 Manifest，条目数一致"""
+        json_path = tmp_path / "input.json"
+        manifest_path = tmp_path / "output.manifest"
+
+        entries = [
+            {"path": "data/file_a.bin", "size": 100, "checksum": "d41d8cd98f00b204e9800998ecf8427e"},
+            {"path": "data/file_b.txt", "size": 200, "checksum": "098f6bcd4621d373cade4e832627b4f6"},
+        ]
+        self._make_json(json_path, entries)
+
+        ManifestJsonConverter.json_to_manifest_trusted(str(json_path), str(manifest_path))
+
+        assert manifest_path.exists()
+        with ManifestReader(str(manifest_path), checksum_hook=MD5Hook()) as reader:
+            assert reader.entry_count == 2
+            all_paths = reader.list_all()
+            assert "data/file_a.bin" in all_paths
+            assert "data/file_b.txt" in all_paths
+
+    def test_checksum_written_verbatim(self, tmp_path):
+        """checksum 应原样写入，不重新计算"""
+        json_path = tmp_path / "verbatim.json"
+        manifest_path = tmp_path / "verbatim.manifest"
+
+        fake_checksum = "aabbccddeeff00112233445566778899"  # 伪造的 MD5，不对应任何真实文件
+        entries = [{"path": "fake/file.dat", "size": 999, "checksum": fake_checksum}]
+        self._make_json(json_path, entries)
+
+        ManifestJsonConverter.json_to_manifest_trusted(str(json_path), str(manifest_path))
+
+        with ManifestReader(str(manifest_path), checksum_hook=MD5Hook()) as reader:
+            entry = reader.get_entry("fake/file.dat")
+            assert entry.checksum.hex() == fake_checksum
+            assert entry.raw_size == 999
+
+    def test_empty_checksum_is_allowed(self, tmp_path):
+        """checksum 为空字符串或 None 时，写入空字节，不应抛出异常"""
+        json_path = tmp_path / "no_checksum.json"
+        manifest_path = tmp_path / "no_checksum.manifest"
+
+        entries = [
+            {"path": "assets/no_hash.bin", "size": 42, "checksum": ""},
+            {"path": "assets/null_hash.bin", "size": 42, "checksum": None},
+        ]
+        self._make_json(json_path, entries, checksum_algo=0)
+
+        # 不应抛出任何异常
+        ManifestJsonConverter.json_to_manifest_trusted(str(json_path), str(manifest_path))
+
+        assert manifest_path.exists()
+
+    def test_invalid_checksum_hex_raises_value_error(self, tmp_path):
+        """无效的十六进制 checksum 应抛出 ValueError"""
+        json_path = tmp_path / "bad_hex.json"
+        manifest_path = tmp_path / "bad_hex.manifest"
+
+        entries = [{"path": "data/bad.bin", "size": 10, "checksum": "NOT_A_HEX_STRING!!"}]
+        self._make_json(json_path, entries)
+
+        with pytest.raises(ValueError, match="无法解析为十六进制字节"):
+            ManifestJsonConverter.json_to_manifest_trusted(str(json_path), str(manifest_path))
+
+    def test_roundtrip_consistency_with_standard_method(self, tmp_path, sample_files):
+        """与标准方法的往返一致性：相同源文件，两个方法写入的条目路径应完全一致
+
+        trusted 方法复用从 manifest_to_json 导出的 checksum，
+        结果与标准方法（重新计算）的路径集合应相同。
+        """
+        src_dir, files = sample_files
+
+        # 先用标准流程构建 Manifest → JSON
+        manifest_orig = tmp_path / "orig.manifest"
+        json_path = tmp_path / "exported.json"
+        builder = ManifestBuilder(str(manifest_orig), checksum_hook=MD5Hook())
+        builder.add_dir(str(src_dir), "/assets")
+        builder.build()
+        ManifestJsonConverter.manifest_to_json(str(manifest_orig), str(json_path))
+
+        # 分别用两种方式从 JSON 还原
+        manifest_standard = tmp_path / "standard.manifest"
+        manifest_trusted = tmp_path / "trusted.manifest"
+
+        ManifestJsonConverter.json_to_manifest(
+            str(json_path),
+            str(manifest_standard),
+            local_base_path=str(tmp_path),
+            path_mappings={"assets": str(src_dir)},
+        )
+        ManifestJsonConverter.json_to_manifest_trusted(str(json_path), str(manifest_trusted))
+
+        # 比较路径集合
+        with ManifestReader(str(manifest_standard), checksum_hook=MD5Hook()) as r_std:
+            with ManifestReader(str(manifest_trusted), checksum_hook=MD5Hook()) as r_trust:
+                assert r_std.entry_count == r_trust.entry_count
+                assert sorted(r_std.list_all()) == sorted(r_trust.list_all())
+
+        # trusted 方法写入的 checksum 应与标准方法一致（均来自同一 JSON）
+        with ManifestReader(str(manifest_standard), checksum_hook=MD5Hook()) as r_std:
+            with ManifestReader(str(manifest_trusted), checksum_hook=MD5Hook()) as r_trust:
+                for path in r_std.list_all():
+                    e_std = r_std.get_entry(path)
+                    e_trust = r_trust.get_entry(path)
+                    assert e_std.checksum == e_trust.checksum
+                    assert e_std.raw_size == e_trust.raw_size
+
+    def test_magic_and_flags_inherited_from_json(self, tmp_path):
+        """magic 和 index_flags 应从 JSON 继承写入文件头"""
+        from grimoire.core.schema import FileHeader
+
+        json_path = tmp_path / "custom_magic.json"
+        manifest_path = tmp_path / "custom_magic.manifest"
+
+        entries = [{"path": "x/y.bin", "size": 8, "checksum": ""}]
+        self._make_json(json_path, entries, magic="TEST", index_flags=2)  # zlib 压缩索引
+
+        from grimoire.hooks.crypto import ZlibCompressHook
+        ManifestJsonConverter.json_to_manifest_trusted(
+            str(json_path),
+            str(manifest_path),
+            index_crypto_override=ZlibCompressHook(),
+        )
+
+        with open(manifest_path, 'rb') as f:
+            header = FileHeader.unpack(f.read(FileHeader.SIZE))
+
+        assert header.magic == b"TEST"
+        assert header.flags == 2
+
+    def test_no_local_files_needed(self, tmp_path):
+        """核心约束验证：目标路径对应的本地文件不存在，转换仍应成功"""
+        json_path = tmp_path / "ghost.json"
+        manifest_path = tmp_path / "ghost.manifest"
+
+        entries = [
+            {"path": "Game/DATA/UI.wad", "size": 1928919, "checksum": "25257bd378b43c8b91376d5a8c800b6a"},
+            {"path": "Game/DATA/Sound.wad", "size": 4096000, "checksum": "d41d8cd98f00b204e9800998ecf8427e"},
+        ]
+        self._make_json(json_path, entries)
+
+        # 本地根本没有 Game/DATA/*.wad，但转换不能失败
+        ManifestJsonConverter.json_to_manifest_trusted(str(json_path), str(manifest_path))
+
+        with ManifestReader(str(manifest_path), checksum_hook=MD5Hook()) as reader:
+            assert reader.entry_count == 2
+
+
 # ==================== Archive ↔ Manifest 转换测试 ====================
 
 class TestArchiveToManifest:

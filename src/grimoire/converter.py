@@ -206,6 +206,102 @@ class ManifestJsonConverter:
         result.elapsed_time = tracker.finish()
         return result
 
+    @staticmethod
+    def json_to_manifest_trusted(
+        json_path: str,
+        output_path: str,
+        checksum_hook_override: Optional[ChecksumHook] = None,
+        index_crypto_override: Optional[IndexCryptoHook] = None,
+    ) -> None:
+        """
+        将 JSON 直接还原为二进制 Manifest（完全信任 JSON 内数据）
+
+        与 json_to_manifest 的关键区别：
+        - 本方法 **不读取任何本地文件**，也 **不重新计算 checksum**。
+        - 直接将 JSON 中的 ``size`` 和 ``checksum`` 原样写入二进制结构。
+        - 因此 **无需** 提供 local_base_path。
+
+        .. warning:: 风险说明
+
+            1. **数据完整性无法保证**：若 JSON 中的 checksum/size 已损坏或
+               被篡改，生成的 Manifest 将携带错误的校验值，运行时校验
+               将通过但文件实际上已损坏。
+            2. **checksum 格式依赖**：JSON 中的 checksum 必须是十六进制字符串，
+               且与目标算法的输出长度严格匹配；否则写入的字节序列将无意义。
+            3. **不适合生产构建**：仅推荐用于以下场景：
+               - 快速恢复/迁移已知可信的清单备份
+               - 跨环境同步（源文件不可访问，但 JSON 来自可信来源）
+               - 单元测试 / CI 中的 Manifest 快速生成
+
+        Args:
+            json_path: JSON 文件路径
+            output_path: 输出 Manifest 文件路径
+            checksum_hook_override: 覆盖 JSON 中的校验 Hook（决定文件头写入的算法 ID）
+            index_crypto_override: 覆盖 JSON 中的索引加密 Hook
+
+        Raises:
+            ValueError: JSON 中的 checksum 无法解析为字节序列
+            KeyError: JSON 条目缺少必要字段 (``path`` / ``size`` / ``checksum``)
+        """
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # 确定 Hook（支持 override）
+        if checksum_hook_override:
+            checksum_hook = checksum_hook_override
+        else:
+            algo_id = data.get('checksum_algo', 0)
+            checksum_hook = get_checksum_hook_by_id(algo_id)
+
+        if index_crypto_override:
+            index_crypto = index_crypto_override
+        else:
+            flags = data.get('index_flags', 0)
+            index_crypto = get_index_crypto_by_flags(flags)
+
+        magic = data.get('magic', 'GRIM').encode('ascii')[:4].ljust(4, b'\x00')
+
+        builder = ManifestBuilder(
+            output_path,
+            magic=magic,
+            checksum_hook=checksum_hook,
+            index_crypto=index_crypto,
+        )
+
+        from .utils import split_path, default_path_hash
+        from .core.schema import ManifestEntry
+
+        for entry in data.get('entries', []):
+            vfs_path = entry['path']
+            raw_size = int(entry['size'])
+
+            # 信任 JSON 中的 checksum，直接转换为 bytes
+            checksum_hex = entry.get('checksum') or ''
+            try:
+                checksum_bytes = bytes.fromhex(checksum_hex) if checksum_hex else b''
+            except ValueError as exc:
+                raise ValueError(
+                    f"条目 '{vfs_path}' 的 checksum 无法解析为十六进制字节: {checksum_hex!r}"
+                ) from exc
+
+            normalized = normalize_path(vfs_path)
+            dir_part, name, ext = split_path(normalized)
+            path_hash = default_path_hash(normalized)
+            dir_id, name_id, ext_id = builder._path_dict.add_path(dir_part, name, ext)
+
+            manifest_entry = ManifestEntry(
+                path_hash=path_hash,
+                dir_id=dir_id,
+                name_id=name_id,
+                ext_id=ext_id,
+                raw_size=raw_size,
+                checksum=checksum_bytes,
+            )
+            builder._entries.append(manifest_entry)
+            builder._hash_to_path[path_hash] = normalized
+
+        builder.build()
+
 
 class ModeConverter:
     """
